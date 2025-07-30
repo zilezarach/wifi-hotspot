@@ -23,4 +23,6 @@ model Session {
   checkoutRequestId  String?
   expiry     DateTime
   paid       Boolean  @default(false)
-}
+  createdAt          DateTime @default(now())
+  usedData           BigInt?  @default(0)
+} 

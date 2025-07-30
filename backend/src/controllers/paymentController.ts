@@ -1,8 +1,9 @@
 import { Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
 import { initiateStkPush } from "../services/mpesaService";
-import { grantAccess } from "../services/accessService";
+import { grantAccess, getUserMac } from "../services/accessService";
 import logger from "../utils/logger";
+import { isBefore, parseISO } from "date-fns";
 
 const prisma = new PrismaClient();
 
@@ -57,6 +58,40 @@ export async function initiatePayment(
   req: Request<unknown, unknown, { planId: string; phone?: string }>,
   res: Response
 ) {
+  const freeMode = process.env.FREE_MODE === "true";
+  const freeModeEndDate = process.env.FREE_MODE_END_DATE
+    ? parseISO(process.env.FREE_MODE_END_DATE)
+    : null;
+  const isFreePeriodActive =
+    freeMode && freeModeEndDate && isBefore(new Date(), freeModeEndDate);
+
+  const userIp = req.ip ?? "unknown";
+  const userMac = await getUserMac(userIp); // Fetch real MAC
+
+  if (isFreePeriodActive) {
+    const expiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // e.g., 24h free; adjust
+    try {
+      await prisma.session.create({
+        data: {
+          mac: userMac,
+          ip: userIp,
+          planName: "Free Promo",
+          planHours: 24,
+          dataCap: null,
+          expiry,
+          paid: true,
+        },
+      });
+      await grantAccess(userIp, true, null); // Limited access for free promo
+      return res.json({
+        message: "Welcome! Enjoy free access during the promo.",
+      });
+    } catch (error) {
+      logger.error("Free mode error:", error);
+      return res.status(500).json({ error: "Server error" });
+    }
+  }
+
   const { planId, phone } = req.body;
   if (!planId) {
     return res.status(400).json({ error: "Missing planId" });
@@ -66,9 +101,6 @@ export async function initiatePayment(
   if (!selectedPlan) {
     return res.status(400).json({ error: "Invalid plan selected" });
   }
-
-  const userIp = req.ip ?? "unknown";
-  const userMac = "00:00:00:00:00:00";
 
   const expiry = new Date(Date.now() + selectedPlan.hours * 60 * 60 * 1000);
 
@@ -85,15 +117,17 @@ export async function initiatePayment(
           paid: true,
         },
       });
-      await grantAccess(userIp);
+      await grantAccess(userIp, true, selectedPlan.dataCap); // Limited with data cap if set
       return res.json({ message: "Free access granted for 30 minutes!" });
     } catch (error) {
       logger.error("Free plan error:", error);
       return res.status(500).json({ error: "Server error" });
     }
   } else {
-    if (!phone) {
-      return res.status(400).json({ error: "Phone required for paid plans" });
+    if (!phone || !/^254\d{9}$/.test(phone)) {
+      return res
+        .status(400)
+        .json({ error: "Invalid or missing phone (format: 254xxxxxxxxx)" });
     }
 
     try {
@@ -123,6 +157,53 @@ export async function initiatePayment(
   }
 }
 
+export async function getSessionStatus(req: Request, res: Response) {
+  const userIp = req.ip ?? "unknown";
+
+  try {
+    const session = await prisma.session.findFirst({
+      where: {
+        ip: userIp,
+        paid: true,
+        expiry: {
+          gt: new Date(),
+        },
+      },
+      orderBy: {
+        id: "desc",
+      },
+    });
+
+    if (!session) {
+      return res.json({
+        hasActiveSession: false,
+        timeRemaining: 0,
+        plan: null,
+      });
+    }
+
+    const now = new Date();
+    const timeRemaining = Math.max(
+      0,
+      Math.floor((session.expiry.getTime() - now.getTime()) / 1000)
+    );
+
+    res.json({
+      hasActiveSession: true,
+      timeRemaining,
+      plan: {
+        name: session.planName,
+        hours: session.planHours,
+        dataCap: session.dataCap,
+      },
+      expiry: session.expiry,
+    });
+  } catch (error) {
+    logger.error("Session status error:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+}
+
 export async function mpesaCallback(req: Request, res: Response) {
   const data = req.body.Body.stkCallback;
   const checkoutRequestId = data.CheckoutRequestID;
@@ -140,7 +221,7 @@ export async function mpesaCallback(req: Request, res: Response) {
         where: { id: session.id },
         data: { paid: true },
       });
-      await grantAccess(session.ip);
+      await grantAccess(session.ip, false, session.dataCap); // Pass dataCap for enforcement
       logger.info("Payment successful for session:", session.id);
     } else {
       logger.warn(

@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.showPortal = showPortal;
 exports.initiatePayment = initiatePayment;
+exports.getSessionStatus = getSessionStatus;
 exports.mpesaCallback = mpesaCallback;
 const client_1 = require("@prisma/client");
 const mpesaService_1 = require("../services/mpesaService");
@@ -119,6 +120,46 @@ async function initiatePayment(req, res) {
             logger_1.default.error("Payment initiation error:", error);
             res.status(500).json({ error: "Server error" });
         }
+    }
+}
+async function getSessionStatus(req, res) {
+    const userIp = req.ip ?? "unknown";
+    try {
+        const session = await prisma.session.findFirst({
+            where: {
+                ip: userIp,
+                paid: true,
+                expiry: {
+                    gt: new Date(), // Still active
+                },
+            },
+            orderBy: {
+                id: "desc",
+            },
+        });
+        if (!session) {
+            return res.json({
+                hasActiveSession: false,
+                timeRemaining: 0,
+                plan: null,
+            });
+        }
+        const now = new Date();
+        const timeRemaining = Math.max(0, Math.floor((session.expiry.getTime() - now.getTime()) / 1000));
+        res.json({
+            hasActiveSession: true,
+            timeRemaining,
+            plan: {
+                name: session.planName,
+                hours: session.planHours,
+                dataCap: session.dataCap,
+            },
+            expiry: session.expiry,
+        });
+    }
+    catch (error) {
+        logger_1.default.error("Session status error:", error);
+        res.status(500).json({ error: "Server error" });
     }
 }
 async function mpesaCallback(req, res) {

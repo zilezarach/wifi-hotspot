@@ -4,12 +4,13 @@ import { useState } from "react";
 import ExpirationModal from "./Modal/ExpirationModal";
 import WelcomeModal from "./Modal/WelcomeModal";
 import FreeDurationTimer from "./components/Duration";
+import { useSessionStatus } from "./hooks/useSessionStatus";
 
 function App() {
   const [showWelcomeModal, setShowWelcomeModal] = useState(true);
   const [freeTrialStarted, setFreeTrialStarted] = useState(false);
   const [trialExpired, setTrialExpired] = useState(false);
-
+  const [status, loading] = useSessionStatus();
   const handleAcceptFreeTrial = () => {
     setShowWelcomeModal(false);
     setFreeTrialStarted(true);
@@ -34,6 +35,24 @@ function App() {
   const handleDisconnect = () => {
     console.log("User disconnected");
   };
+
+  if (loading) {
+    return <div>Loading Seasion status ...</div>;
+  }
+
+  if (status.hasActiveSession) {
+    return (
+      <div className="active-session">
+        <h2>Active Session</h2>
+        <p>Plan: {status.plan.name}</p>
+        <FreeDurationTimer
+          duration={status.timeRemaining / 60} // Convert seconds to minutes for your timer
+          onExpired={handleTrialExpired}
+        />
+        <p>Expires: {new Date(status.expiry).toLocaleString()}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="app">
