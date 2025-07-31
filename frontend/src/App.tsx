@@ -8,7 +8,6 @@ import { useSessionStatus } from "./hooks/useSessionStatus";
 
 function App() {
   const [showWelcomeModal, setShowWelcomeModal] = useState(true);
-  const [freeTrialStarted, setFreeTrialStarted] = useState(false);
   const [trialExpired, setTrialExpired] = useState(false);
   const { status, loading } = useSessionStatus();
 
@@ -17,16 +16,22 @@ function App() {
       const response = await fetch("/api/pay", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ planId: "community-freebie" })
+        body: JSON.stringify({
+          planId: "community-freebie",
+          duration: "30m"
+        })
       });
       const data = await response.json();
       console.log("API Response:", data);
-      if (data.message.includes("granted")) {
-        alert("Trial activated! Try browsing now.");
-        window.location.reload();
-        setFreeTrialStarted(true);
+
+      if (data.success) {
+        setShowWelcomeModal(false);
+        // Reload to check session status
+        setTimeout(() => {
+          window.location.reload();
+        }, 1000);
       } else {
-        alert("Error: " + (data.error || "Unknown"));
+        alert("Error: " + (data.message || data.error || "Unknown error"));
       }
     } catch (error) {
       console.error("Fetch error:", error);
@@ -44,30 +49,80 @@ function App() {
 
   const handlePurchasePlan = () => {
     setTrialExpired(false);
+    setShowWelcomeModal(false);
   };
 
-  const handleExtendTrial = () => {
+  const handleExtendTrial = async () => {
+    await handleAcceptFreeTrial();
     setTrialExpired(false);
   };
 
-  const handleDisconnect = () => {
-    console.log("User disconnected");
+  const handleDisconnect = async () => {
+    try {
+      await fetch("/api/disconnect", { method: "POST" });
+      console.log("User disconnected");
+      window.location.reload();
+    } catch (error) {
+      console.error("Disconnect error:", error);
+    }
   };
 
   if (loading) {
-    return <div>Loading Seasion status ...</div>;
+    return (
+      <div className="loading-screen">
+        <Wifi size={48} className="loading-icon" />
+        <p>Checking session status...</p>
+      </div>
+    );
   }
 
   if (status.hasActiveSession) {
     return (
       <div className="active-session">
-        <h2>Active Session</h2>
-        <p>Plan: {status.plan?.name ?? "Unknown"}</p>
-        <FreeDurationTimer
-          duration={status.timeRemaining / 60} // Convert seconds to minutes for your timer
-          onExpired={handleTrialExpired}
-        />
-        <p>Expires: {status.expiry ? new Date(status.expiry).toLocaleString() : "N/A"}</p>
+        <div className="session-header">
+          <Wifi size={32} color="#4ade80" />
+          <h2>Connected to Zile WiFi</h2>
+        </div>
+
+        <div className="session-info">
+          <div className="session-detail">
+            <span className="label">Active Plan:</span>
+            <span className="value">{status.plan?.name ?? "Unknown"}</span>
+          </div>
+
+          <div className="session-detail">
+            <span className="label">Time Remaining:</span>
+            <span className="value">
+              {Math.floor(status.timeRemaining / 3600)}h {Math.floor((status.timeRemaining % 3600) / 60)}m
+            </span>
+          </div>
+
+          {status.expiry && (
+            <div className="session-detail">
+              <span className="label">Expires:</span>
+              <span className="value">{new Date(status.expiry).toLocaleString()}</span>
+            </div>
+          )}
+        </div>
+
+        <FreeDurationTimer duration={status.timeRemaining / 60} onExpired={handleTrialExpired} />
+
+        <div className="session-actions">
+          <button onClick={() => setShowWelcomeModal(false)} className="upgrade-btn">
+            Upgrade Plan
+          </button>
+          <button onClick={handleDisconnect} className="disconnect-btn">
+            Disconnect
+          </button>
+        </div>
+
+        {trialExpired && (
+          <ExpirationModal
+            onPurchase={handlePurchasePlan}
+            onExtend={handleExtendTrial}
+            onDisconnect={handleDisconnect}
+          />
+        )}
       </div>
     );
   }
@@ -75,9 +130,11 @@ function App() {
   return (
     <div className="app">
       {showWelcomeModal && <WelcomeModal onAccept={handleAcceptFreeTrial} onDecline={handleDeclineFreeTrial} />}
+
       {trialExpired && (
         <ExpirationModal onPurchase={handlePurchasePlan} onExtend={handleExtendTrial} onDisconnect={handleDisconnect} />
       )}
+
       {/* Header */}
       <div className="header">
         <div className="logo-container">
@@ -110,7 +167,7 @@ function App() {
 
       {/* Payment Form */}
       <PaymentForm />
-      {freeTrialStarted && !trialExpired && <FreeDurationTimer duration={30} onExpired={handleTrialExpired} />}
+
       {/* Footer */}
       <div className="footer">
         <p>Powered by Zile and M-Pesa</p>

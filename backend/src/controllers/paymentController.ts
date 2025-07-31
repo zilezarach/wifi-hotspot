@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
 import { initiateStkPush } from "../services/mpesaService";
-import { grantAccess, getUserMac } from "../services/accessService";
+import { rb951Manager } from "../services/mikrotik-rb951";
 import logger from "../utils/logger";
 import { isBefore, parseISO } from "date-fns";
 
@@ -21,7 +21,7 @@ const PLANS = [
     name: "Daily Boost",
     hours: 24,
     price: 50,
-    dataCap: 5000,
+    dataCap: 5000, // 5GB in MB
     description: "24 Hours (5GB Data Cap)"
   },
   {
@@ -29,7 +29,7 @@ const PLANS = [
     name: "Family Share",
     hours: 24,
     price: 80,
-    dataCap: 10000,
+    dataCap: 10000, // 10GB in MB
     description: "24 Hours (10GB Shared Data)"
   },
   {
@@ -45,66 +45,228 @@ const PLANS = [
     name: "Community Freebie",
     hours: 0.5,
     price: 0,
-    dataCap: null,
-    description: "30 Minutes/Day (Essentials Only)"
+    dataCap: 100, // 100MB for free plan
+    description: "30 Minutes/Day (100MB Data Cap)"
   }
 ];
 
+// Helper function to get user IP consistently
+function getUserIP(req: any): string {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string") {
+    return forwarded.split(",")[0].trim();
+  }
+  if (Array.isArray(forwarded)) {
+    return forwarded[0].trim();
+  }
+  return req.socket.remoteAddress || req.ip || "unknown";
+}
+
+// Grant access through MikroTik
+async function grantAccess(
+  ip: string,
+  isLimited: boolean,
+  dataCap?: number | null,
+  duration?: string
+): Promise<{ success: boolean; message: string }> {
+  try {
+    // First try to get MAC address
+    const mac = await rb951Manager.getUserMac(ip);
+
+    if (mac === "00:00:00:00:00:00") {
+      logger.warn(`Could not determine MAC for IP ${ip}, proceeding with IP-only binding`);
+    }
+
+    // Determine access duration for MikroTik profiles
+    let mikrotikDuration = "1Hr"; // default
+    if (duration) {
+      const hours = parseFloat(duration);
+      if (hours <= 0.5) mikrotikDuration = "30m";
+      else if (hours <= 1) mikrotikDuration = "1Hr";
+      else if (hours <= 4) mikrotikDuration = "4Hrs";
+      else if (hours <= 12) mikrotikDuration = "12Hrs";
+      else mikrotikDuration = "24Hrs";
+    }
+
+    // Grant access based on whether it's limited or unlimited
+    let result;
+    if (isLimited || dataCap) {
+      // For limited access, use IP binding with bypassed type but we'll monitor usage
+      result = await rb951Manager.grantAccessByIP(ip, mikrotikDuration);
+    } else {
+      // For unlimited access
+      result = await rb951Manager.grantAccessByIP(ip, mikrotikDuration);
+    }
+
+    if (result.success) {
+      logger.info(
+        `✅ Access granted for IP ${ip}, MAC: ${mac}, Duration: ${mikrotikDuration}, DataCap: ${dataCap || "unlimited"}`
+      );
+    }
+
+    return result;
+  } catch (error: any) {
+    logger.error(`❌ Failed to grant access for ${ip}:`, error);
+    return {
+      success: false,
+      message: `Failed to grant access: ${error.message || error}`
+    };
+  }
+}
+
+// Check and enforce data cap
+async function checkDataCapExceeded(ip: string, dataCap: number): Promise<boolean> {
+  try {
+    const activeUsers = await rb951Manager.getActiveUsers();
+    const user = activeUsers.find((u: any) => u.address === ip);
+
+    if (user) {
+      const bytesIn = parseInt(user["bytes-in"] || "0");
+      const bytesOut = parseInt(user["bytes-out"] || "0");
+      const totalBytes = bytesIn + bytesOut;
+      const totalMB = totalBytes / (1024 * 1024);
+
+      logger.info(`📊 Data usage for ${ip}: ${totalMB.toFixed(2)}MB / ${dataCap}MB`);
+
+      if (totalMB >= dataCap) {
+        logger.warn(`🚫 Data cap exceeded for ${ip}: ${totalMB.toFixed(2)}MB >= ${dataCap}MB`);
+        return true;
+      }
+    }
+
+    return false;
+  } catch (error) {
+    logger.error(`Error checking data cap for ${ip}:`, error);
+    return false;
+  }
+}
+
+// Get data usage for a user
+async function getDataUsage(
+  ip: string
+): Promise<{ uploaded: number; downloaded: number; total: number; totalMB: number }> {
+  try {
+    const activeUsers = await rb951Manager.getActiveUsers();
+    const user = activeUsers.find((u: any) => u.address === ip);
+
+    if (user) {
+      const uploaded = parseInt(user["bytes-out"] || "0");
+      const downloaded = parseInt(user["bytes-in"] || "0");
+      const total = uploaded + downloaded;
+      const totalMB = total / (1024 * 1024);
+
+      return { uploaded, downloaded, total, totalMB };
+    }
+
+    return { uploaded: 0, downloaded: 0, total: 0, totalMB: 0 };
+  } catch (error) {
+    logger.error(`Error getting data usage for ${ip}:`, error);
+    return { uploaded: 0, downloaded: 0, total: 0, totalMB: 0 };
+  }
+}
+
+// Main controller functions
 export async function showPortal(req: Request, res: Response) {
   res.sendFile("index.html", { root: "public" });
 }
 
-export async function initiatePayment(
-  req: Request<unknown, unknown, { planId: string; phone?: string }>,
-  res: Response
-) {
+export async function getPlans(req: Request, res: Response) {
+  try {
+    res.json({
+      success: true,
+      plans: PLANS.map(plan => ({
+        ...plan,
+        dataCapGB: plan.dataCap ? (plan.dataCap / 1000).toFixed(1) : null
+      }))
+    });
+  } catch (error) {
+    logger.error("Error fetching plans:", error);
+    res.status(500).json({ error: "Failed to fetch plans" });
+  }
+}
+
+export async function initiatePayment(req: Request, res: Response) {
   const freeMode = process.env.FREE_MODE === "true";
   const freeModeEndDate = process.env.FREE_MODE_END_DATE ? parseISO(process.env.FREE_MODE_END_DATE) : null;
   const isFreePeriodActive = freeMode && freeModeEndDate && isBefore(new Date(), freeModeEndDate);
 
-  const userIp = req.headers["x-forwarded-for"]?.toString().split(",")[0] || req.socket.remoteAddress || "unknown";
-  logger.info(`Detected user IP: ${userIp}`);
-  const userMac = await getUserMac(userIp); // Fetch real MAC
+  const userIp = getUserIP(req);
+  logger.info(`🌐 Payment initiation from IP: ${userIp}`);
 
-  if (isFreePeriodActive) {
-    const expiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // e.g., 24h free; adjust
-    try {
-      await prisma.session.create({
+  try {
+    const userMac = await rb951Manager.getUserMac(userIp);
+    logger.info(`📱 User MAC: ${userMac}`);
+
+    // Check for existing active session
+    const existingSession = await prisma.session.findFirst({
+      where: {
+        OR: [{ ip: userIp }, { mac: userMac !== "00:00:00:00:00:00" ? userMac : undefined }].filter(Boolean),
+        paid: true,
+        expiry: { gt: new Date() }
+      },
+      orderBy: { id: "desc" }
+    });
+
+    if (existingSession) {
+      return res.status(400).json({
+        error: "You already have an active session",
+        session: {
+          planName: existingSession.planName,
+          expiry: existingSession.expiry
+        }
+      });
+    }
+
+    // Handle free promo period
+    if (isFreePeriodActive) {
+      const expiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h free
+
+      const session = await prisma.session.create({
         data: {
           mac: userMac,
           ip: userIp,
           planName: "Free Promo",
           planHours: 24,
-          dataCap: null,
+          dataCap: 1000, // 1GB for promo
           expiry,
           paid: true
         }
       });
-      await grantAccess(userIp, true, null); // Limited access for free promo
-      return res.json({
-        message: "Welcome! Enjoy free access during the promo."
-      });
-    } catch (error) {
-      logger.error("Free mode error:", error);
-      return res.status(500).json({ error: "Server error" });
+
+      const accessResult = await grantAccess(userIp, true, 1000, "24");
+
+      if (accessResult.success) {
+        return res.json({
+          success: true,
+          message: "🎉 Welcome! Enjoy free access during the promo period.",
+          session: {
+            id: session.id,
+            planName: session.planName,
+            expiry: session.expiry,
+            dataCap: session.dataCap
+          }
+        });
+      } else {
+        await prisma.session.delete({ where: { id: session.id } });
+        return res.status(500).json({ error: "Failed to grant access" });
+      }
     }
-  }
 
-  const { planId, phone } = req.body;
-  if (!planId) {
-    return res.status(400).json({ error: "Missing planId" });
-  }
+    const { planId, phone } = req.body as { planId: string; phone?: string };
+    if (!planId) {
+      return res.status(400).json({ error: "Missing planId" });
+    }
 
-  const selectedPlan = PLANS.find(p => p.id === planId);
-  if (!selectedPlan) {
-    return res.status(400).json({ error: "Invalid plan selected" });
-  }
+    const selectedPlan = PLANS.find(p => p.id === planId);
+    if (!selectedPlan) {
+      return res.status(400).json({ error: "Invalid plan selected" });
+    }
 
-  const expiry = new Date(Date.now() + selectedPlan.hours * 60 * 60 * 1000);
+    const expiry = new Date(Date.now() + selectedPlan.hours * 60 * 60 * 1000);
 
-  if (selectedPlan.price === 0) {
-    try {
-      await prisma.session.create({
+    // Handle free plans
+    if (selectedPlan.price === 0) {
+      const session = await prisma.session.create({
         data: {
           mac: userMac,
           ip: userIp,
@@ -115,71 +277,121 @@ export async function initiatePayment(
           paid: true
         }
       });
-      await grantAccess(userIp, true, selectedPlan.dataCap); // Limited with data cap if set
-      return res.json({ message: "Free access granted for 30 minutes!" });
-    } catch (error) {
-      logger.error("Free plan error:", error);
-      return res.status(500).json({ error: "Server error" });
-    }
-  } else {
-    if (!phone || !/^254\d{9}$/.test(phone)) {
-      return res.status(400).json({ error: "Invalid or missing phone (format: 254xxxxxxxxx)" });
-    }
 
-    try {
-      const stkResponse = await initiateStkPush(phone, selectedPlan.price);
-      if (stkResponse.ResponseCode === "0") {
-        const checkoutRequestId = stkResponse.CheckoutRequestID;
-        await prisma.session.create({
-          data: {
-            mac: userMac,
-            ip: userIp,
-            planName: selectedPlan.name,
-            planHours: selectedPlan.hours,
-            dataCap: selectedPlan.dataCap,
-            expiry,
-            paid: false,
-            checkoutRequestId
+      const accessResult = await grantAccess(userIp, true, selectedPlan.dataCap, selectedPlan.hours.toString());
+
+      if (accessResult.success) {
+        return res.json({
+          success: true,
+          message: `🎁 Free access granted for ${selectedPlan.hours * 60} minutes!`,
+          session: {
+            id: session.id,
+            planName: session.planName,
+            expiry: session.expiry,
+            dataCap: session.dataCap
           }
         });
-        res.json({ message: "Payment request sent. Complete on your phone." });
       } else {
-        res.status(500).json({ error: "Payment initiation failed" });
+        await prisma.session.delete({ where: { id: session.id } });
+        return res.status(500).json({ error: "Failed to grant access" });
       }
-    } catch (error) {
-      logger.error("Payment initiation error:", error);
-      res.status(500).json({ error: "Server error" });
     }
+
+    // Handle paid plans
+    if (!phone || !/^254\d{9}$/.test(phone)) {
+      return res.status(400).json({
+        error: "Invalid or missing phone number (format: 254xxxxxxxxx)"
+      });
+    }
+
+    const stkResponse = await initiateStkPush(phone, selectedPlan.price);
+
+    if (stkResponse.ResponseCode === "0") {
+      const checkoutRequestId = stkResponse.CheckoutRequestID;
+
+      const session = await prisma.session.create({
+        data: {
+          mac: userMac,
+          ip: userIp,
+          planName: selectedPlan.name,
+          planHours: selectedPlan.hours,
+          dataCap: selectedPlan.dataCap,
+          expiry,
+          paid: false,
+          checkoutRequestId
+        }
+      });
+
+      res.json({
+        success: true,
+        message: "📱 Payment request sent. Complete on your phone.",
+        checkoutRequestId,
+        session: {
+          id: session.id,
+          planName: session.planName,
+          amount: selectedPlan.price
+        }
+      });
+    } else {
+      logger.error("STK Push failed:", stkResponse);
+      res.status(500).json({ error: "Payment initiation failed. Please try again." });
+    }
+  } catch (error) {
+    logger.error("Payment initiation error:", error);
+    res.status(500).json({ error: "Server error. Please try again." });
   }
 }
 
 export async function getSessionStatus(req: Request, res: Response) {
-  const userIp = req.ip ?? "unknown";
+  const userIp = getUserIP(req);
 
   try {
+    const userMac = await rb951Manager.getUserMac(userIp);
+
     const session = await prisma.session.findFirst({
       where: {
-        ip: userIp,
+        OR: [{ ip: userIp }, { mac: userMac !== "00:00:00:00:00:00" ? userMac : undefined }].filter(Boolean),
         paid: true,
-        expiry: {
-          gt: new Date()
-        }
+        expiry: { gt: new Date() }
       },
-      orderBy: {
-        id: "desc"
-      }
+      orderBy: { id: "desc" }
     });
 
     if (!session) {
       return res.json({
         hasActiveSession: false,
         timeRemaining: 0,
-        plan: null
+        plan: null,
+        dataUsage: null
       });
+    }
+
+    // Check if data cap exceeded
+    if (session.dataCap) {
+      const exceeded = await checkDataCapExceeded(userIp, session.dataCap);
+      if (exceeded) {
+        // Disconnect user and expire session
+        await rb951Manager.disconnectUser(userIp);
+        await prisma.session.update({
+          where: { id: session.id },
+          data: { expiry: new Date() }
+        });
+
+        return res.json({
+          hasActiveSession: false,
+          timeRemaining: 0,
+          plan: null,
+          dataUsage: null,
+          message: "Data cap exceeded. Session terminated."
+        });
+      }
     }
 
     const now = new Date();
     const timeRemaining = Math.max(0, Math.floor((session.expiry.getTime() - now.getTime()) / 1000));
+
+    // Get current data usage
+    const dataUsage = await getDataUsage(userIp);
 
     res.json({
       hasActiveSession: true,
@@ -187,9 +399,17 @@ export async function getSessionStatus(req: Request, res: Response) {
       plan: {
         name: session.planName,
         hours: session.planHours,
-        dataCap: session.dataCap
+        dataCap: session.dataCap,
+        dataCapGB: session.dataCap ? (session.dataCap / 1000).toFixed(1) : null
       },
-      expiry: session.expiry
+      expiry: session.expiry,
+      dataUsage: {
+        totalMB: Math.round(dataUsage.totalMB * 100) / 100,
+        uploadedMB: Math.round((dataUsage.uploaded / (1024 * 1024)) * 100) / 100,
+        downloadedMB: Math.round((dataUsage.downloaded / (1024 * 1024)) * 100) / 100,
+        remainingMB: session.dataCap ? Math.max(0, session.dataCap - dataUsage.totalMB) : null,
+        percentUsed: session.dataCap ? Math.min(100, (dataUsage.totalMB / session.dataCap) * 100) : null
+      }
     });
   } catch (error) {
     logger.error("Session status error:", error);
@@ -197,30 +417,238 @@ export async function getSessionStatus(req: Request, res: Response) {
   }
 }
 
-export async function mpesaCallback(req: Request, res: Response) {
-  const data = req.body.Body.stkCallback;
-  const checkoutRequestId = data.CheckoutRequestID;
+export async function getDataUsageStatus(req: Request, res: Response) {
+  const userIp = getUserIP(req);
 
-  if (data.ResultCode === 0) {
+  try {
     const session = await prisma.session.findFirst({
       where: {
-        checkoutRequestId,
-        paid: false
+        ip: userIp,
+        paid: true,
+        expiry: { gt: new Date() }
       }
     });
 
-    if (session) {
-      await prisma.session.update({
-        where: { id: session.id },
-        data: { paid: true }
-      });
-      await grantAccess(session.ip, false, session.dataCap); // Pass dataCap for enforcement
-      logger.info("Payment successful for session:", session.id);
-    } else {
-      logger.warn("No matching session found for CheckoutRequestID:", checkoutRequestId);
+    if (!session || !session.dataCap) {
+      return res.json({ hasDataCap: false });
     }
-  } else {
-    logger.error("Payment failed:", data);
+
+    const usage = await getDataUsage(userIp);
+    const percentUsed = (usage.totalMB / session.dataCap) * 100;
+
+    res.json({
+      hasDataCap: true,
+      dataCap: session.dataCap,
+      dataCapGB: (session.dataCap / 1000).toFixed(1),
+      used: Math.round(usage.totalMB * 100) / 100,
+      remaining: Math.max(0, session.dataCap - usage.totalMB),
+      percentUsed: Math.round(percentUsed * 100) / 100,
+      nearLimit: percentUsed > 80,
+      exceeded: percentUsed >= 100
+    });
+  } catch (error) {
+    logger.error("Data usage status error:", error);
+    res.status(500).json({ error: "Server error" });
   }
-  res.send("OK");
+}
+
+export async function disconnectSession(req: Request, res: Response) {
+  const userIp = getUserIP(req);
+
+  try {
+    const session = await prisma.session.findFirst({
+      where: {
+        ip: userIp,
+        paid: true,
+        expiry: { gt: new Date() }
+      }
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: "No active session found" });
+    }
+
+    // Disconnect from MikroTik
+    const disconnectResult = await rb951Manager.disconnectUser(userIp);
+
+    // Expire the session in database
+    await prisma.session.update({
+      where: { id: session.id },
+      data: { expiry: new Date() }
+    });
+
+    res.json({
+      success: true,
+      message: "Session disconnected successfully",
+      disconnectResult
+    });
+  } catch (error) {
+    logger.error("Disconnect session error:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+}
+
+export async function mpesaCallback(req: Request, res: Response) {
+  try {
+    const data = req.body.Body?.stkCallback;
+    if (!data) {
+      return res.status(400).send("Invalid callback data");
+    }
+
+    const checkoutRequestId = data.CheckoutRequestID;
+    logger.info(`📞 M-Pesa callback received for ${checkoutRequestId}`);
+
+    if (data.ResultCode === 0) {
+      // Payment successful
+      const session = await prisma.session.findFirst({
+        where: {
+          checkoutRequestId,
+          paid: false
+        }
+      });
+
+      if (session) {
+        // Update session as paid
+        await prisma.session.update({
+          where: { id: session.id },
+          data: { paid: true }
+        });
+
+        // Grant access
+        const accessResult = await grantAccess(
+          session.ip,
+          !!session.dataCap,
+          session.dataCap,
+          session.planHours.toString()
+        );
+
+        if (accessResult.success) {
+          logger.info(`✅ Payment successful and access granted for session ${session.id}`);
+        } else {
+          logger.error(`❌ Payment successful but failed to grant access for session ${session.id}`);
+        }
+      } else {
+        logger.warn(`⚠️ No matching session found for CheckoutRequestID: ${checkoutRequestId}`);
+      }
+    } else {
+      // Payment failed
+      logger.error("💳 Payment failed:", {
+        checkoutRequestId,
+        resultCode: data.ResultCode,
+        resultDesc: data.ResultDesc
+      });
+
+      // Optionally clean up failed session
+      const session = await prisma.session.findFirst({
+        where: { checkoutRequestId, paid: false }
+      });
+
+      if (session) {
+        await prisma.session.delete({ where: { id: session.id } });
+      }
+    }
+
+    res.send("OK");
+  } catch (error) {
+    logger.error("M-Pesa callback error:", error);
+    res.status(500).send("Error processing callback");
+  }
+}
+
+// Background job to monitor data caps and expired sessions
+export async function startDataCapMonitoring() {
+  const monitoringInterval = setInterval(async () => {
+    try {
+      const activeSessions = await prisma.session.findMany({
+        where: {
+          paid: true,
+          expiry: { gt: new Date() },
+          dataCap: { not: null }
+        }
+      });
+
+      logger.info(`🔍 Monitoring ${activeSessions.length} sessions with data caps`);
+
+      for (const session of activeSessions) {
+        if (session.dataCap) {
+          const exceeded = await checkDataCapExceeded(session.ip, session.dataCap);
+          if (exceeded) {
+            logger.warn(`🚫 Terminating session ${session.id} due to data cap exceeded`);
+
+            // Disconnect user
+            await rb951Manager.disconnectUser(session.ip);
+
+            // Expire session
+            await prisma.session.update({
+              where: { id: session.id },
+              data: { expiry: new Date() }
+            });
+          }
+        }
+      }
+    } catch (error) {
+      logger.error("Data cap monitoring error:", error);
+    }
+  }, 60000); // Check every minute
+
+  // Clean up expired sessions every 5 minutes
+  const cleanupInterval = setInterval(async () => {
+    try {
+      const expiredSessions = await prisma.session.findMany({
+        where: {
+          paid: true,
+          expiry: { lt: new Date() }
+        }
+      });
+
+      logger.info(`🧹 Cleaning up ${expiredSessions.length} expired sessions`);
+
+      for (const session of expiredSessions) {
+        await rb951Manager.disconnectUser(session.ip);
+      }
+    } catch (error) {
+      logger.error("Session cleanup error:", error);
+    }
+  }, 300000); // Every 5 minutes
+
+  logger.info("📊 Data cap monitoring and session cleanup started");
+
+  return { monitoringInterval, cleanupInterval };
+}
+
+// System status endpoint
+export async function getSystemStatus(req: Request, res: Response) {
+  try {
+    const [mikrotikStatus, activeUsers, activeSessions, todaysSessions] = await Promise.all([
+      rb951Manager.testConnection(),
+      rb951Manager.getActiveUsers(),
+      prisma.session.count({
+        where: {
+          paid: true,
+          expiry: { gt: new Date() }
+        }
+      }),
+      prisma.session.count({
+        where: {
+          paid: true,
+          createdAt: {
+            gte: new Date(new Date().setHours(0, 0, 0, 0))
+          }
+        }
+      })
+    ]);
+
+    res.json({
+      mikrotik: mikrotikStatus,
+      stats: {
+        activeUsers: activeUsers.length,
+        activeSessions,
+        todaysSessions
+      },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error("System status error:", error);
+    res.status(500).json({ error: "Failed to get system status" });
+  }
 }
