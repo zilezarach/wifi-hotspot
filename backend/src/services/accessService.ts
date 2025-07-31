@@ -36,6 +36,22 @@ async function mikrotikRequest(
   }
 }
 
+export async function getUsageForIp(ip: string): Promise<bigint> {
+  try {
+    const queues = (await mikrotikRequest("get", "/queue/simple")) as any[];
+    const q = queues.find(q => q.name === `cap-${ip}` || q.target === ip);
+    if (q && typeof q.bytes === "string") {
+      // q.bytes format: "12345/67890" where first is tx+rx
+      const used = q.bytes.split("/")[0];
+      return BigInt(used);
+    }
+    return BigInt(0);
+  } catch (err) {
+    logger.error(`getUsageForIp failed for ${ip}`, err);
+    return BigInt(0);
+  }
+}
+
 /** Lookup a client’s MAC from its IP */
 export async function getUserMac(ip: string): Promise<string> {
   try {
