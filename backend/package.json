@@ -31,7 +31,6 @@
     "date-fns": "^4.1.0",
     "express": "^5.1.0",
     "express-rate-limit": "^8.0.1",
-    "mikronode": "^2.3.11",
     "node-ssh": "^13.2.1"
   }
 }
