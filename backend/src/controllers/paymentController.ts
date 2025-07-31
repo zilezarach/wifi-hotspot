@@ -14,7 +14,7 @@ const PLANS = [
     hours: 1,
     price: 10,
     dataCap: null,
-    description: "1 Hour (Unlimited Data)",
+    description: "1 Hour (Unlimited Data)"
   },
   {
     id: "daily-boost",
@@ -22,7 +22,7 @@ const PLANS = [
     hours: 24,
     price: 50,
     dataCap: 5000,
-    description: "24 Hours (5GB Data Cap)",
+    description: "24 Hours (5GB Data Cap)"
   },
   {
     id: "family-share",
@@ -30,7 +30,7 @@ const PLANS = [
     hours: 24,
     price: 80,
     dataCap: 10000,
-    description: "24 Hours (10GB Shared Data)",
+    description: "24 Hours (10GB Shared Data)"
   },
   {
     id: "weekly-unlimited",
@@ -38,7 +38,7 @@ const PLANS = [
     hours: 168,
     price: 200,
     dataCap: null,
-    description: "7 Days (Unlimited Data, up to 5Mbps)",
+    description: "7 Days (Unlimited Data, up to 5Mbps)"
   },
   {
     id: "community-freebie",
@@ -46,8 +46,8 @@ const PLANS = [
     hours: 0.5,
     price: 0,
     dataCap: null,
-    description: "30 Minutes/Day (Essentials Only)",
-  },
+    description: "30 Minutes/Day (Essentials Only)"
+  }
 ];
 
 export async function showPortal(req: Request, res: Response) {
@@ -59,13 +59,11 @@ export async function initiatePayment(
   res: Response
 ) {
   const freeMode = process.env.FREE_MODE === "true";
-  const freeModeEndDate = process.env.FREE_MODE_END_DATE
-    ? parseISO(process.env.FREE_MODE_END_DATE)
-    : null;
-  const isFreePeriodActive =
-    freeMode && freeModeEndDate && isBefore(new Date(), freeModeEndDate);
+  const freeModeEndDate = process.env.FREE_MODE_END_DATE ? parseISO(process.env.FREE_MODE_END_DATE) : null;
+  const isFreePeriodActive = freeMode && freeModeEndDate && isBefore(new Date(), freeModeEndDate);
 
-  const userIp = req.ip ?? "unknown";
+  const userIp = req.headers["x-forwarded-for"]?.toString().split(",")[0] || req.socket.remoteAddress || "unknown";
+  logger.info(`Detected user IP: ${userIp}`);
   const userMac = await getUserMac(userIp); // Fetch real MAC
 
   if (isFreePeriodActive) {
@@ -79,12 +77,12 @@ export async function initiatePayment(
           planHours: 24,
           dataCap: null,
           expiry,
-          paid: true,
-        },
+          paid: true
+        }
       });
       await grantAccess(userIp, true, null); // Limited access for free promo
       return res.json({
-        message: "Welcome! Enjoy free access during the promo.",
+        message: "Welcome! Enjoy free access during the promo."
       });
     } catch (error) {
       logger.error("Free mode error:", error);
@@ -97,7 +95,7 @@ export async function initiatePayment(
     return res.status(400).json({ error: "Missing planId" });
   }
 
-  const selectedPlan = PLANS.find((p) => p.id === planId);
+  const selectedPlan = PLANS.find(p => p.id === planId);
   if (!selectedPlan) {
     return res.status(400).json({ error: "Invalid plan selected" });
   }
@@ -114,8 +112,8 @@ export async function initiatePayment(
           planHours: selectedPlan.hours,
           dataCap: selectedPlan.dataCap,
           expiry,
-          paid: true,
-        },
+          paid: true
+        }
       });
       await grantAccess(userIp, true, selectedPlan.dataCap); // Limited with data cap if set
       return res.json({ message: "Free access granted for 30 minutes!" });
@@ -125,9 +123,7 @@ export async function initiatePayment(
     }
   } else {
     if (!phone || !/^254\d{9}$/.test(phone)) {
-      return res
-        .status(400)
-        .json({ error: "Invalid or missing phone (format: 254xxxxxxxxx)" });
+      return res.status(400).json({ error: "Invalid or missing phone (format: 254xxxxxxxxx)" });
     }
 
     try {
@@ -143,8 +139,8 @@ export async function initiatePayment(
             dataCap: selectedPlan.dataCap,
             expiry,
             paid: false,
-            checkoutRequestId,
-          },
+            checkoutRequestId
+          }
         });
         res.json({ message: "Payment request sent. Complete on your phone." });
       } else {
@@ -166,27 +162,24 @@ export async function getSessionStatus(req: Request, res: Response) {
         ip: userIp,
         paid: true,
         expiry: {
-          gt: new Date(),
-        },
+          gt: new Date()
+        }
       },
       orderBy: {
-        id: "desc",
-      },
+        id: "desc"
+      }
     });
 
     if (!session) {
       return res.json({
         hasActiveSession: false,
         timeRemaining: 0,
-        plan: null,
+        plan: null
       });
     }
 
     const now = new Date();
-    const timeRemaining = Math.max(
-      0,
-      Math.floor((session.expiry.getTime() - now.getTime()) / 1000)
-    );
+    const timeRemaining = Math.max(0, Math.floor((session.expiry.getTime() - now.getTime()) / 1000));
 
     res.json({
       hasActiveSession: true,
@@ -194,9 +187,9 @@ export async function getSessionStatus(req: Request, res: Response) {
       plan: {
         name: session.planName,
         hours: session.planHours,
-        dataCap: session.dataCap,
+        dataCap: session.dataCap
       },
-      expiry: session.expiry,
+      expiry: session.expiry
     });
   } catch (error) {
     logger.error("Session status error:", error);
@@ -212,22 +205,19 @@ export async function mpesaCallback(req: Request, res: Response) {
     const session = await prisma.session.findFirst({
       where: {
         checkoutRequestId,
-        paid: false,
-      },
+        paid: false
+      }
     });
 
     if (session) {
       await prisma.session.update({
         where: { id: session.id },
-        data: { paid: true },
+        data: { paid: true }
       });
       await grantAccess(session.ip, false, session.dataCap); // Pass dataCap for enforcement
       logger.info("Payment successful for session:", session.id);
     } else {
-      logger.warn(
-        "No matching session found for CheckoutRequestID:",
-        checkoutRequestId
-      );
+      logger.warn("No matching session found for CheckoutRequestID:", checkoutRequestId);
     }
   } else {
     logger.error("Payment failed:", data);
