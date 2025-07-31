@@ -15,11 +15,9 @@ async function executeMikroCommand(
 ): Promise<any> {
   try {
     const conn = await getConnection().connect();
+    conn.setTimeout(5000);
     const chan = conn.channel(channel);
-    const response = await chan.write([
-      command,
-      ...Object.entries(params).map(([k, v]) => `=${k}=${v}`),
-    ]);
+    const response = await chan.write([command, ...Object.entries(params).map(([k, v]) => `=${k}=${v}`)]);
     chan.close();
     conn.close();
     return response;
@@ -32,7 +30,7 @@ async function executeMikroCommand(
 export async function getUserMac(ip: string): Promise<string> {
   try {
     const response = await executeMikroCommand("mac", "/ip/arp/print", {
-      where: `address=${ip}`,
+      where: `address=${ip}`
     } as any); // Type assertion
     return response[0]?.["mac-address"] || "00:00:00:00:00:00";
   } catch (error) {
@@ -45,7 +43,7 @@ export async function getUsageForIp(ip: string): Promise<bigint> {
   try {
     const response = await executeMikroCommand("usage", "/queue/simple/print", {
       detail: "",
-      where: `name=cap-${ip}`,
+      where: `name=cap-${ip}`
     } as any);
     if (response && response[0]) {
       const totalBytes = BigInt(response[0]["bytes"]?.split("/")[0] || 0);
@@ -58,36 +56,25 @@ export async function getUsageForIp(ip: string): Promise<bigint> {
   }
 }
 
-export async function grantAccess(
-  ip: string,
-  limited: boolean = false,
-  dataCap: number | null = null
-): Promise<void> {
+export async function grantAccess(ip: string, limited: boolean = false, dataCap: number | null = null): Promise<void> {
   const commands = [
     {
       cmd: "/ip/hotspot/ip-binding/add",
       params: {
         address: ip,
         type: "bypassed",
-        comment: "Granted access",
-      } as any,
-    },
+        comment: "Granted access"
+      } as any
+    }
   ];
 
   if (limited) {
-    const essentialDomains = [
-      "google.com",
-      "ecitizen.go.ke",
-      "kra.go.ke",
-      "nhif.or.ke",
-      "nssf.or.ke",
-      "helb.co.ke",
-    ];
+    const essentialDomains = ["google.com", "ecitizen.go.ke", "kra.go.ke", "nhif.or.ke", "nssf.or.ke", "helb.co.ke"];
 
     for (const domain of essentialDomains) {
       commands.push({
         cmd: "/ip/firewall/address-list/add",
-        params: { list: "essentials", address: domain } as any,
+        params: { list: "essentials", address: domain } as any
       });
       commands.push({
         cmd: "/ip/firewall/filter/add",
@@ -95,22 +82,22 @@ export async function grantAccess(
           chain: "forward",
           "src-address": ip,
           "dst-address-list": "essentials",
-          action: "accept",
-        } as any,
+          action: "accept"
+        } as any
       });
     }
 
     commands.push({
       cmd: "/ip/firewall/address-list/add",
-      params: { list: "blocked", address: "facebook.com" } as any,
+      params: { list: "blocked", address: "facebook.com" } as any
     });
     commands.push({
       cmd: "/ip/firewall/address-list/add",
-      params: { list: "blocked", address: "youtube.com" } as any,
+      params: { list: "blocked", address: "youtube.com" } as any
     });
     commands.push({
       cmd: "/ip/firewall/address-list/add",
-      params: { list: "blocked", address: "netflix.com" } as any,
+      params: { list: "blocked", address: "netflix.com" } as any
     });
     commands.push({
       cmd: "/ip/firewall/filter/add",
@@ -118,8 +105,8 @@ export async function grantAccess(
         chain: "forward",
         "src-address": ip,
         "dst-address-list": "blocked",
-        action: "drop",
-      } as any,
+        action: "drop"
+      } as any
     });
 
     commands.push({
@@ -127,8 +114,8 @@ export async function grantAccess(
       params: {
         name: `limited-${ip}`,
         target: ip,
-        "max-limit": "512k/512k",
-      } as any,
+        "max-limit": "512k/512k"
+      } as any
     });
   }
 
@@ -147,12 +134,12 @@ export async function revokeAccess(ip: string): Promise<void> {
   const commands = [
     {
       cmd: "/ip/hotspot/ip-binding/remove",
-      params: { ".id": `* [find address=${ip}]` } as any,
+      params: { ".id": `* [find address=${ip}]` } as any
     },
     {
       cmd: "/queue/simple/remove",
-      params: { ".id": `* [find name=limited-${ip}]` } as any,
-    },
+      params: { ".id": `* [find name=limited-${ip}]` } as any
+    }
   ];
 
   for (const { cmd, params } of commands) {
