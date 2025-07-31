@@ -8,9 +8,9 @@ const REST_BASE = `http://${ROUTER_IP}/rest`;
 const REQUEST_TIMEOUT = Number(process.env.ROUTER_TIMEOUT) || 5000;
 const MAX_RETRIES = 3;
 
-/** Low-level helper for MikroTik REST calls with retries */
+/** Low-level helper for MikroTik REST calls */
 async function mikrotikRequest(
-  method: "get" | "post" | "patch" | "delete",
+  method: "get" | "post" | "delete",
   endpoint: string,
   data?: Record<string, any>,
   retries = MAX_RETRIES
@@ -36,30 +36,35 @@ async function mikrotikRequest(
   }
 }
 
-/** 1) Lookup a client’s MAC from its IP */
+/** Lookup a client’s MAC from its IP */
 export async function getUserMac(ip: string): Promise<string> {
   try {
     const arps = await mikrotikRequest("get", "/ip/arp");
     const entry = (arps as any[]).find(a => a.address === ip);
-    return entry?.["mac-address"] ?? "";
+    return entry?.["mac-address"] ?? "00:00:00:00:00:00";
   } catch (err) {
     logger.error(`getUserMac failed for ${ip}`, err);
-    return "";
+    return "00:00:00:00:00:00";
   }
 }
 
-/** 2) Grant access: bypass captive portal + optional limits */
-export async function grantAccess(ip: string, opts: { limited?: boolean; dataCapMb?: number } = {}): Promise<void> {
-  // Always bypass the hotspot
+/**
+ * Grant access to a client:
+ * @param ip        The client’s IP
+ * @param limited   true = limited plan (whitelist essentials + queue), false = full access
+ * @param dataCapMb Optional data cap in MB (if you need to enforce per-session)
+ */
+export async function grantAccess(ip: string, limited = false, dataCapMb: number | null = null): Promise<void> {
+  // 1) Bypass the hotspot for this IP
   await mikrotikRequest("post", "/ip/hotspot/ip-binding", {
     address: ip,
     type: "bypassed",
     comment: "Paid session"
   });
 
-  if (opts.limited) {
-    // Example: only allow essential domains
-    const essentials = ["google.com", "map.safaricom.co.ke"];
+  if (limited) {
+    // 2) Whitelist essential domains
+    const essentials = ["google.com", "ecitizen.go.ke", "kra.go.ke", "nhif.or.ke", "nssf.or.ke", "helb.co.ke"];
     for (const host of essentials) {
       await mikrotikRequest("post", "/ip/firewall/address-list", {
         list: "essentials",
@@ -73,19 +78,22 @@ export async function grantAccess(ip: string, opts: { limited?: boolean; dataCap
       });
     }
 
-    // Speed-limit queue
-    await mikrotikRequest("post", "/queue/simple", {
-      name: `limited-${ip}`,
-      target: ip,
-      "max-limit": "512k/512k",
-      comment: "Limited plan"
-    });
+    // 3) If you want to enforce a data cap, you could add a queue-simple entry here
+    if (dataCapMb && dataCapMb > 0) {
+      await mikrotikRequest("post", "/queue/simple", {
+        name: `cap-${ip}`,
+        target: ip,
+        "max-limit": "512k/512k",
+        "total-limit": `${dataCapMb}M`,
+        comment: "Data cap enforcement"
+      });
+    }
   }
 
-  logger.info(`Access granted for ${ip} (limited=${Boolean(opts.limited)})`);
+  logger.info(`Access granted for ${ip} (limited=${limited}, cap=${dataCapMb}MB)`);
 }
 
-/** 3) Revoke all bindings & limits when the session expires */
+/** Revoke access when the session ends */
 export async function revokeAccess(ip: string): Promise<void> {
   // Remove hotspot bypass
   const binds = await mikrotikRequest("get", "/ip/hotspot/ip-binding");
@@ -94,9 +102,9 @@ export async function revokeAccess(ip: string): Promise<void> {
     await mikrotikRequest("delete", `/ip/hotspot/ip-binding/${bind[".id"]}`);
   }
 
-  // Remove any queue
+  // Remove data-cap queue if present
   const queues = await mikrotikRequest("get", "/queue/simple");
-  const q = (queues as any[]).find(q => q.name === `limited-${ip}`);
+  const q = (queues as any[]).find(q => q.name === `cap-${ip}`);
   if (q) {
     await mikrotikRequest("delete", `/queue/simple/${q[".id"]}`);
   }
