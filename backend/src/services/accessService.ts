@@ -1,129 +1,177 @@
 import axios, { AxiosError } from "axios";
-import logger from "../utils/logger";
+import logger from "../utils/logger"; // Adjust path to your logger
 
-const ROUTER_IP = process.env.ROUTER_IP!;
-const ROUTER_USER = process.env.ROUTER_USERNAME!;
-const ROUTER_PASS = process.env.ROUTER_PASSWORD!;
-const REST_BASE = `http://${ROUTER_IP}/rest`;
-const REQUEST_TIMEOUT = Number(process.env.ROUTER_TIMEOUT) || 5000;
-const MAX_RETRIES = 3;
+// Router configuration from env vars
+const routerBaseUrl = `http://${process.env.ROUTER_IP ?? "192.168.88.1"}/rest`; // Change to https:// if using SSL
+const auth = {
+  username: process.env.ROUTER_USERNAME ?? "admin",
+  password: process.env.ROUTER_PASSWORD ?? ""
+};
+const requestTimeout = 5000; // 5 seconds timeout for API calls
+const maxRetries = 3; // Retry failed requests up to 3 times
 
-/** Low-level helper for MikroTik REST calls */
-async function mikrotikRequest(
-  method: "get" | "post" | "delete",
+// Helper function for REST calls with retries and logging
+async function executeRestCommand(
+  method: "get" | "post" | "patch" | "delete",
   endpoint: string,
-  data?: Record<string, any>,
-  retries = MAX_RETRIES
+  data?: Record<string, any>, // Flexible params type
+  retries = maxRetries
 ): Promise<any> {
   try {
-    const res = await axios.request({
+    const response = await axios({
       method,
-      url: `${REST_BASE}${endpoint}`,
-      auth: { username: ROUTER_USER, password: ROUTER_PASS },
+      url: `${routerBaseUrl}${endpoint}`,
       data,
-      timeout: REQUEST_TIMEOUT
+      auth,
+      timeout: requestTimeout
     });
-    logger.debug(`MT REST ${method.toUpperCase()} ${endpoint}`, res.data);
-    return res.data;
-  } catch (err) {
-    const e = err as AxiosError;
-    logger.warn(`MT REST error [${method} ${endpoint}]: ${e.message}`);
-    if (retries > 0 && (e.code === "ECONNABORTED" || e.response?.status === 503)) {
-      await new Promise(r => setTimeout(r, 1000));
-      return mikrotikRequest(method, endpoint, data, retries - 1);
+    logger.info(
+      `MikroTik REST success: ${method.toUpperCase()} ${endpoint} - Response: ${JSON.stringify(response.data)}`
+    );
+    return response.data;
+  } catch (error) {
+    const err = error as AxiosError;
+    logger.error(`MikroTik REST error: ${method.toUpperCase()} ${endpoint} - ${err.message} (Code: ${err.code})`);
+    if (retries > 0 && (err.code === "ECONNABORTED" || err.response?.status === 503)) {
+      logger.warn(`Retrying (${maxRetries - retries + 1}/${maxRetries})...`);
+      await new Promise(resolve => setTimeout(resolve, 1000)); // 1s backoff
+      return executeRestCommand(method, endpoint, data, retries - 1);
     }
-    throw err;
+    throw error; // Rethrow after retries fail
+  }
+}
+
+export async function getUserMac(ip: string): Promise<string> {
+  try {
+    const arps = await executeRestCommand("get", "/ip/arp");
+    const entry = arps.find((a: any) => a.address === ip);
+    return entry?.["mac-address"] || "00:00:00:00:00:00";
+  } catch (error) {
+    logger.warn(`MAC fetch failed for IP ${ip}, using default`, error);
+    return "00:00:00:00:00:00";
   }
 }
 
 export async function getUsageForIp(ip: string): Promise<bigint> {
   try {
-    const queues = (await mikrotikRequest("get", "/queue/simple")) as any[];
-    const q = queues.find(q => q.name === `cap-${ip}` || q.target === ip);
-    if (q && typeof q.bytes === "string") {
-      // q.bytes format: "12345/67890" where first is tx+rx
-      const used = q.bytes.split("/")[0];
-      return BigInt(used);
+    const queues = await executeRestCommand("get", "/queue/simple");
+    const queue = queues.find((q: any) => q.name === `cap-${ip}`);
+    if (queue) {
+      const totalBytes = BigInt(queue.bytes?.split("/")[0] || 0);
+      return totalBytes;
     }
     return BigInt(0);
-  } catch (err) {
-    logger.error(`getUsageForIp failed for ${ip}`, err);
+  } catch (error) {
+    logger.warn(`Usage fetch failed for IP ${ip}`, error);
     return BigInt(0);
   }
 }
 
-/** Lookup a client’s MAC from its IP */
-export async function getUserMac(ip: string): Promise<string> {
-  try {
-    const arps = await mikrotikRequest("get", "/ip/arp");
-    const entry = (arps as any[]).find(a => a.address === ip);
-    return entry?.["mac-address"] ?? "00:00:00:00:00:00";
-  } catch (err) {
-    logger.error(`getUserMac failed for ${ip}`, err);
-    return "00:00:00:00:00:00";
-  }
-}
-
-/**
- * Grant access to a client:
- * @param ip        The client’s IP
- * @param limited   true = limited plan (whitelist essentials + queue), false = full access
- * @param dataCapMb Optional data cap in MB (if you need to enforce per-session)
- */
-export async function grantAccess(ip: string, limited = false, dataCapMb: number | null = null): Promise<void> {
-  // 1) Bypass the hotspot for this IP
-  await mikrotikRequest("post", "/ip/hotspot/ip-binding", {
-    address: ip,
-    type: "bypassed",
-    comment: "Paid session"
-  });
+export async function grantAccess(ip: string, limited: boolean = false, dataCap: number | null = null): Promise<void> {
+  const commands: { cmd: string; method: "post"; params: Record<string, any> }[] = [
+    {
+      cmd: "/ip/hotspot/ip-binding",
+      method: "post",
+      params: {
+        address: ip,
+        type: "bypassed",
+        comment: "Granted access"
+      }
+    }
+  ];
 
   if (limited) {
-    // 2) Whitelist essential domains
-    const essentials = ["google.com", "ecitizen.go.ke", "kra.go.ke", "nhif.or.ke", "nssf.or.ke", "helb.co.ke"];
-    for (const host of essentials) {
-      await mikrotikRequest("post", "/ip/firewall/address-list", {
-        list: "essentials",
-        address: host
+    const essentialDomains = ["google.com", "ecitizen.go.ke", "kra.go.ke", "nhif.or.ke", "nssf.or.ke", "helb.co.ke"];
+
+    // Add essentials to address-list
+    for (const domain of essentialDomains) {
+      commands.push({
+        cmd: "/ip/firewall/address-list",
+        method: "post",
+        params: { list: "essentials", address: domain }
       });
-      await mikrotikRequest("post", "/ip/firewall/filter", {
+    }
+
+    // Add forward accept rules for essentials
+    for (const domain of essentialDomains) {
+      commands.push({
+        cmd: "/ip/firewall/filter",
+        method: "post",
+        params: {
+          chain: "forward",
+          "src-address": ip,
+          "dst-address-list": "essentials",
+          action: "accept"
+        }
+      });
+    }
+
+    // Blocked domains
+    const blockedDomains = ["facebook.com", "youtube.com", "netflix.com"];
+    for (const domain of blockedDomains) {
+      commands.push({
+        cmd: "/ip/firewall/address-list",
+        method: "post",
+        params: { list: "blocked", address: domain }
+      });
+    }
+
+    // Drop rule for blocked
+    commands.push({
+      cmd: "/ip/firewall/filter",
+      method: "post",
+      params: {
         chain: "forward",
         "src-address": ip,
-        "dst-address-list": "essentials",
-        action: "accept"
-      });
-    }
+        "dst-address-list": "blocked",
+        action: "drop"
+      }
+    });
 
-    // 3) If you want to enforce a data cap, you could add a queue-simple entry here
-    if (dataCapMb && dataCapMb > 0) {
-      await mikrotikRequest("post", "/queue/simple", {
-        name: `cap-${ip}`,
+    // Speed limit queue
+    commands.push({
+      cmd: "/queue/simple",
+      method: "post",
+      params: {
+        name: `limited-${ip}`,
         target: ip,
-        "max-limit": "512k/512k",
-        "total-limit": `${dataCapMb}M`,
-        comment: "Data cap enforcement"
-      });
+        "max-limit": "512k/512k"
+      }
+    });
+  }
+
+  for (const { cmd, method, params } of commands) {
+    try {
+      await executeRestCommand(method, cmd, params);
+      logger.info(`Success: ${cmd} for IP ${ip}`);
+    } catch (error) {
+      logger.warn(`Failed but continuing: ${cmd} for IP ${ip}`, error);
     }
   }
 
-  logger.info(`Access granted for ${ip} (limited=${limited}, cap=${dataCapMb}MB)`);
+  logger.info(`Access granted for IP: ${ip} (limited: ${limited}, dataCap: ${dataCap})`);
 }
 
-/** Revoke access when the session ends */
 export async function revokeAccess(ip: string): Promise<void> {
-  // Remove hotspot bypass
-  const binds = await mikrotikRequest("get", "/ip/hotspot/ip-binding");
-  const bind = (binds as any[]).find(b => b.address === ip);
-  if (bind) {
-    await mikrotikRequest("delete", `/ip/hotspot/ip-binding/${bind[".id"]}`);
-  }
+  try {
+    // Revoke IP binding
+    const bindings = await executeRestCommand("get", "/ip/hotspot/ip-binding");
+    const bindingId = bindings.find((b: any) => b.address === ip)?.[".id"];
+    if (bindingId) {
+      await executeRestCommand("delete", `/ip/hotspot/ip-binding/${bindingId}`);
+    }
 
-  // Remove data-cap queue if present
-  const queues = await mikrotikRequest("get", "/queue/simple");
-  const q = (queues as any[]).find(q => q.name === `cap-${ip}`);
-  if (q) {
-    await mikrotikRequest("delete", `/queue/simple/${q[".id"]}`);
-  }
+    // Revoke queue
+    const queues = await executeRestCommand("get", "/queue/simple");
+    const queueId = queues.find((q: any) => q.name === `limited-${ip}`)?.[".id"];
+    if (queueId) {
+      await executeRestCommand("delete", `/queue/simple/${queueId}`);
+    }
 
-  logger.info(`Access revoked for ${ip}`);
+    // Note: For firewall rules/address-lists, you may need similar queries and deletes if they should be cleaned up
+
+    logger.info(`Access revoked for IP: ${ip}`);
+  } catch (error) {
+    logger.error(`Revoke failed for IP ${ip}`, error);
+  }
 }
