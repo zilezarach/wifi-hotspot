@@ -11,9 +11,27 @@ function App() {
   const [freeTrialStarted, setFreeTrialStarted] = useState(false);
   const [trialExpired, setTrialExpired] = useState(false);
   const { status, loading } = useSessionStatus();
-  const handleAcceptFreeTrial = () => {
-    setShowWelcomeModal(false);
-    setFreeTrialStarted(true);
+
+  const handleAcceptFreeTrial = async () => {
+    try {
+      const response = await fetch("/api/pay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planId: "community-freebie" })
+      });
+      const data = await response.json();
+      console.log("API Response:", data);
+      if (data.message.includes("granted")) {
+        alert("Trial activated! Try browsing now.");
+        window.location.reload();
+        setFreeTrialStarted(true);
+      } else {
+        alert("Error: " + (data.error || "Unknown"));
+      }
+    } catch (error) {
+      console.error("Fetch error:", error);
+      alert("Network error starting trial.");
+    }
   };
 
   const handleTrialExpired = () => {
@@ -49,28 +67,16 @@ function App() {
           duration={status.timeRemaining / 60} // Convert seconds to minutes for your timer
           onExpired={handleTrialExpired}
         />
-        <p>
-          Expires:{" "}
-          {status.expiry ? new Date(status.expiry).toLocaleString() : "N/A"}
-        </p>
+        <p>Expires: {status.expiry ? new Date(status.expiry).toLocaleString() : "N/A"}</p>
       </div>
     );
   }
 
   return (
     <div className="app">
-      {showWelcomeModal && (
-        <WelcomeModal
-          onAccept={handleAcceptFreeTrial}
-          onDecline={handleDeclineFreeTrial}
-        />
-      )}
+      {showWelcomeModal && <WelcomeModal onAccept={handleAcceptFreeTrial} onDecline={handleDeclineFreeTrial} />}
       {trialExpired && (
-        <ExpirationModal
-          onPurchase={handlePurchasePlan}
-          onExtend={handleExtendTrial}
-          onDisconnect={handleDisconnect}
-        />
+        <ExpirationModal onPurchase={handlePurchasePlan} onExtend={handleExtendTrial} onDisconnect={handleDisconnect} />
       )}
       {/* Header */}
       <div className="header">
@@ -79,8 +85,7 @@ function App() {
         </div>
         <h1>Zile WiFi Hotspot</h1>
         <p className="subtitle">
-          Get instant internet access with our secure WiFi hotspot. Pay with
-          M-Pesa and connect immediately.
+          Get instant internet access with our secure WiFi hotspot. Pay with M-Pesa and connect immediately.
         </p>
       </div>
 
@@ -105,9 +110,7 @@ function App() {
 
       {/* Payment Form */}
       <PaymentForm />
-      {freeTrialStarted && !trialExpired && (
-        <FreeDurationTimer duration={30} onExpired={handleTrialExpired} />
-      )}
+      {freeTrialStarted && !trialExpired && <FreeDurationTimer duration={30} onExpired={handleTrialExpired} />}
       {/* Footer */}
       <div className="footer">
         <p>Powered by Zile and M-Pesa</p>
