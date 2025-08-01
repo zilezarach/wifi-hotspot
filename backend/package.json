@@ -40,9 +40,9 @@
     "winston": "^3.17.0"
   },
   "overrides": {
-    "path-to-regexp": "^6.3.0"
+    "path-to-regexp": "1.8.0"
   },
   "resolutions": {
-    "path-to-regexp": "^6.3.0"
+    "path-to-regexp": "1.8.0"
   }
 }
