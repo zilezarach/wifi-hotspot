@@ -14,22 +14,24 @@ import {
 } from "./controllers/paymentController";
 
 const app = express();
-
+const paymentLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { error: "Too many requests – try again later" },
+  standardHeaders: true,
+  legacyHeaders: false, // Add this
+  skip: req => {
+    // Skip rate limiting for health checks
+    return req.path === "/health";
+  }
+});
 // Middleware
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 app.set("trust proxy", 1);
 
 // Rate limiting (prevent spam on pay endpoint – 10 reqs/min per IP)
-app.use(
-  "/api/pay",
-  rateLimit({
-    windowMs: 60 * 1000,
-    max: 10,
-    message: { error: "Too many requests – try again later" },
-    standardHeaders: true
-  })
-);
+app.post("/api/pay", paymentLimiter, initiatePayment);
 
 // API Routes FIRST (before static files)
 app.post("/api/pay", initiatePayment);
