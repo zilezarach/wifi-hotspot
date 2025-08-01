@@ -4,9 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "build": "prisma generate && tsc && prisma migrate deploy",
-    "start": "node dist/server.js",
-    "dev": "ts-node-dev src/server.ts"
+    "build": "prisma generate && tsc",
+    "build:full": "prisma generate && tsc && prisma migrate deploy",
+    "migrate": "prisma migrate deploy",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js"
   },
   "keywords": [],
   "author": "",
