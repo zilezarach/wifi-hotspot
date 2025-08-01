@@ -1,6 +1,6 @@
 import PaymentForm from "./components/PaymentForm";
 import { Wifi, Shield, Zap, CreditCard } from "lucide-react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import ExpirationModal from "./Modal/ExpirationModal";
 import WelcomeModal from "./Modal/WelcomeModal";
 import FreeDurationTimer from "./components/Duration";
@@ -10,21 +10,34 @@ function App() {
   const [showWelcomeModal, setShowWelcomeModal] = useState(false);
   const [trialExpired, setTrialExpired] = useState(false);
   const { status, loading } = useSessionStatus();
-
+  const [hasShownWelcome, setHasShownWelcome] = useState(false);
+  const initRef = useRef(false);
   // Store MikroTik parameters on component mount
   useEffect(() => {
+    if (initRef.current) return;
+    initRef.current = true;
+
     const urlParams = new URLSearchParams(window.location.search);
     const userIP = urlParams.get("ip");
     const userMAC = urlParams.get("mac");
 
-    if (userIP) localStorage.setItem("userIP", userIP);
-    if (userMAC) localStorage.setItem("userMAC", userMAC);
-
-    // Show welcome modal only for new users (no active session)
-    if (!loading && !status.hasActiveSession) {
-      setShowWelcomeModal(true);
+    // Only store if not already stored
+    if (userIP && !localStorage.getItem("userIP")) {
+      localStorage.setItem("userIP", userIP);
     }
-  }, [loading, status.hasActiveSession]);
+    if (userMAC && !localStorage.getItem("userMAC")) {
+      localStorage.setItem("userMAC", userMAC);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (loading || hasShownWelcome) return;
+
+    if (!status.hasActiveSession) {
+      setShowWelcomeModal(true);
+      setHasShownWelcome(true);
+    }
+  }, [loading, status.hasActiveSession, hasShownWelcome]);
 
   const handleAcceptFreeTrial = async () => {
     try {
@@ -45,9 +58,11 @@ function App() {
 
       if (data.success) {
         setShowWelcomeModal(false);
+        // Prevent immediate redirect that might cause refresh
         setTimeout(() => {
-          window.location.href = "https://google.com";
-        }, 1000);
+          // Use location.replace instead of href to prevent back button issues
+          window.location.replace("https://google.com");
+        }, 2000);
       } else {
         alert("Error: " + (data.message || "Unknown error"));
       }

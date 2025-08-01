@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import axios from "axios";
 
 interface SessionPlan {
@@ -35,72 +35,74 @@ export const useSessionStatus = () => {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const mountedRef = useRef(true);
 
   const fetchStatus = useCallback(async () => {
+    if (!mountedRef.current) return;
+
     try {
       setError(null);
 
-      // Get user IP from URL params or localStorage
-      const urlParams = new URLSearchParams(window.location.search);
-      const userIP = urlParams.get("ip") || localStorage.getItem("userIP");
-
       const response = await axios.get("/api/session-status", {
-        params: userIP ? { ip: userIP } : {},
-        timeout: 5000 // Add timeout to prevent hanging requests
+        timeout: 10000,
+        // Add cache prevention
+        headers: {
+          "Cache-Control": "no-cache",
+          Pragma: "no-cache"
+        }
       });
 
-      setStatus(response.data);
-      setLoading(false);
-
-      // If session expired due to data cap, show message
-      if (response.data.message) {
-        console.log("Session message:", response.data.message);
+      if (mountedRef.current) {
+        setStatus(response.data);
+        setLoading(false);
       }
     } catch (error) {
       console.error("Session status fetch error:", error);
-      setError("Failed to fetch session status");
-      setLoading(false);
-
-      // Set default status on error
-      setStatus({
-        hasActiveSession: false,
-        timeRemaining: 0,
-        plan: null,
-        expiry: null,
-        dataUsage: null
-      });
+      if (mountedRef.current) {
+        setError("Failed to fetch session status");
+        setLoading(false);
+        setStatus({
+          hasActiveSession: false,
+          timeRemaining: 0,
+          plan: null,
+          expiry: null,
+          dataUsage: null
+        });
+      }
     }
   }, []);
 
   useEffect(() => {
-    let mounted = true;
+    mountedRef.current = true;
 
-    let interval: ReturnType<typeof setInterval>;
+    // Initial fetch
+    fetchStatus();
 
-    const startPolling = async () => {
-      if (!mounted) return;
-
-      await fetchStatus();
-
-      // Only start polling if component is still mounted and no critical error
-      if (mounted && !error) {
-        interval = setInterval(() => {
-          if (mounted) {
-            fetchStatus();
-          }
-        }, 30000);
+    // Set up polling only after initial fetch
+    const setupPolling = () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
       }
+
+      intervalRef.current = setInterval(() => {
+        if (mountedRef.current) {
+          fetchStatus();
+        }
+      }, 45000); // Increased to 45 seconds to reduce load
     };
 
-    startPolling();
+    // Start polling after initial load
+    const timer = setTimeout(setupPolling, 2000);
 
     return () => {
-      mounted = false;
-      if (interval) {
-        clearInterval(interval);
+      mountedRef.current = false;
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
       }
+      clearTimeout(timer);
     };
-  }, [fetchStatus, error]);
+  }, [fetchStatus]);
 
   return { status, loading, error, refetch: fetchStatus };
 };
