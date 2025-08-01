@@ -18,7 +18,7 @@ const WelcomeModal: React.FC<WelcomeModalProps> = ({ onAccept, onDecline }) => {
           <div className="feature-list">
             <div className="feature-item">
               <Clock size={20} />
-              <span>1 Week of Free Internet</span>
+              <span>30 minutes of Free Internet</span>
             </div>
             <div className="feature-item">
               <Wifi size={20} />

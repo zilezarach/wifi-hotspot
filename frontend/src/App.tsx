@@ -2,12 +2,12 @@ import PaymentForm from "./components/PaymentForm";
 import { Wifi, Shield, Zap, CreditCard } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import ExpirationModal from "./Modal/ExpirationModal";
-import WelcomeModal from "./Modal/WelcomeModal";
+//import WelcomeModal from "./Modal/WelcomeModal";
 import FreeDurationTimer from "./components/Duration";
 import { useSessionStatus } from "./hooks/useSessionStatus";
 
 function App() {
-  const [showWelcomeModal, setShowWelcomeModal] = useState(false);
+  //const [showWelcomeModal, setShowWelcomeModal] = useState(false);
   const [trialExpired, setTrialExpired] = useState(false);
   const { status, loading } = useSessionStatus();
   const [hasShownWelcome, setHasShownWelcome] = useState(false);
@@ -34,7 +34,7 @@ function App() {
     if (loading || hasShownWelcome) return;
 
     if (!status.hasActiveSession) {
-      setShowWelcomeModal(true);
+      // setShowWelcomeModal(true);
       setHasShownWelcome(true);
     }
   }, [loading, status.hasActiveSession, hasShownWelcome]);
@@ -57,7 +57,7 @@ function App() {
       const data = await response.json();
 
       if (data.success) {
-        setShowWelcomeModal(false);
+        // setShowWelcomeModal(false);
         // Prevent immediate redirect that might cause refresh
         setTimeout(() => {
           // Use location.replace instead of href to prevent back button issues
@@ -76,13 +76,13 @@ function App() {
     setTrialExpired(true);
   };
 
-  const handleDeclineFreeTrial = () => {
-    setShowWelcomeModal(false);
-  };
+  // const handleDeclineFreeTrial = () => {
+  // setShowWelcomeModal(false);
+  // };
 
   const handlePurchasePlan = () => {
     setTrialExpired(false);
-    setShowWelcomeModal(false);
+    //setShowWelcomeModal(false);
   };
 
   const handleExtendTrial = async () => {
@@ -171,9 +171,11 @@ function App() {
         <FreeDurationTimer duration={status.timeRemaining / 60} onExpired={handleTrialExpired} />
 
         <div className="session-actions">
+          {/* To used later
           <button onClick={() => setShowWelcomeModal(false)} className="upgrade-btn">
             Upgrade Plan
           </button>
+          */}
           <button onClick={handleDisconnect} className="disconnect-btn">
             Disconnect
           </button>
@@ -192,8 +194,9 @@ function App() {
 
   return (
     <div className="app">
+      {/*To used later
       {showWelcomeModal && <WelcomeModal onAccept={handleAcceptFreeTrial} onDecline={handleDeclineFreeTrial} />}
-
+      */}
       {trialExpired && (
         <ExpirationModal onPurchase={handlePurchasePlan} onExtend={handleExtendTrial} onDisconnect={handleDisconnect} />
       )}

@@ -3,299 +3,175 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-const express_1 = __importDefault(require("express"));
-const cors_1 = __importDefault(require("cors"));
-const path_1 = __importDefault(require("path"));
+exports.server = void 0;
 const dotenv_1 = __importDefault(require("dotenv"));
-const mikrotik_rb951_1 = require("./services/mikrotik-rb951");
-const mpesaService_1 = require("./services/mpesaService");
+const app_1 = __importDefault(require("./app"));
 const logger_1 = __importDefault(require("./utils/logger"));
+const client_1 = require("@prisma/client");
+const paymentController_1 = require("./controllers/paymentController");
+const mikrotik_rb951_1 = __importDefault(require("./services/mikrotik-rb951"));
+// Load environment variables first
 dotenv_1.default.config();
-const app = (0, express_1.default)();
-const PORT = parseInt(process.env.SERVER_PORT || "3000");
-const SERVER_IP = process.env.SERVER_IP || "10.5.50.2";
-app.use((0, cors_1.default)());
-app.use(express_1.default.json());
-// Store pending payments (in production, use Redis or database)
-const pendingPayments = new Map();
-// Middleware to get real client IP
-app.use((req, res, next) => {
-    const forwarded = req.headers["x-forwarded-for"];
-    const realIp = req.headers["x-real-ip"];
-    const remoteAddress = req.socket.remoteAddress;
-    req.clientIP = forwarded?.split(",")[0] || realIp || remoteAddress || "10.5.50.100";
-    next();
-});
-// Serve React build files
-app.use(express_1.default.static(path_1.default.join(__dirname, "../../../frontend/build")));
-// Process M-Pesa payment
-async function processMpesaPayment(phone, planId, clientIP) {
-    try {
-        const amount = (0, mpesaService_1.getPlanPrice)(planId);
-        if (amount === 0) {
-            return { success: false, message: "Invalid plan selected" };
-        }
-        logger_1.default.info(`Processing M-Pesa payment: ${phone}, Plan: ${planId}, Amount: KSh ${amount}`);
-        const stkResponse = await (0, mpesaService_1.initiateStkPush)(phone, amount, `WiFi-${planId}`);
-        if (stkResponse.ResponseCode === "0") {
-            // Store pending payment
-            pendingPayments.set(stkResponse.CheckoutRequestID, {
-                ip: clientIP,
-                phone,
-                planId,
-                duration: getDurationFromPlan(planId),
-                amount,
-                timestamp: Date.now()
-            });
-            return {
-                success: true,
-                message: "Payment request sent to your phone. Please enter your M-Pesa PIN.",
-                checkoutRequestId: stkResponse.CheckoutRequestID
-            };
-        }
-        else {
-            return {
-                success: false,
-                message: stkResponse.errorMessage || "Payment initiation failed"
-            };
-        }
+// Initialize Prisma
+const prisma = new client_1.PrismaClient();
+// Validate required environment variables
+const requiredEnvVars = [
+    "DATABASE_URL",
+    "MIKROTIK_HOST",
+    "MIKROTIK_USER",
+    "MIKROTIK_PASS",
+    "MPESA_CONSUMER_KEY",
+    "MPESA_CONSUMER_SECRET",
+    "MPESA_SHORTCODE",
+    "MPESA_PASSKEY"
+];
+function validateEnvironment() {
+    const missing = requiredEnvVars.filter(varName => !process.env[varName]);
+    if (missing.length > 0) {
+        logger_1.default.error("❌ Missing required environment variables:");
+        missing.forEach(varName => logger_1.default.error(`   - ${varName}`));
+        process.exit(1);
     }
-    catch (error) {
-        logger_1.default.error("M-Pesa payment processing error:", error);
-        return {
-            success: false,
-            message: error.message || "Payment processing failed"
-        };
+    else {
+        logger_1.default.info("✅ All required environment variables are set");
     }
 }
-// Helper function to map plan to duration
-function getDurationFromPlan(planId) {
-    const planDurationMap = {
-        "quick-surf": "1Hr",
-        "quick-surf-4h": "4Hrs",
-        "half-day-boost": "12Hrs",
-        "daily-boost": "24Hrs",
-        "weekly-unlimited": "7d",
-        "community-freebie": "30m"
-    };
-    return planDurationMap[planId] || "1Hr";
+// Database connection test
+async function testDatabaseConnection() {
+    try {
+        await prisma.$connect();
+        logger_1.default.info("✅ Database connection established");
+        // Run any pending migrations in production
+        if (process.env.NODE_ENV === "production") {
+            logger_1.default.info("🔄 Checking for database migrations...");
+            // Note: Migrations should be run via Docker CMD, not here
+        }
+    }
+    catch (error) {
+        logger_1.default.error("❌ Database connection failed:", error);
+        process.exit(1);
+    }
 }
-// API Routes
-app.post("/api/pay", async (req, res) => {
-    const { planId, phone, duration } = req.body;
-    const clientIP = req.clientIP;
+// MikroTik connection test
+async function testMikroTikConnection() {
     try {
-        logger_1.default.info(`Payment request from IP: ${clientIP}, Plan: ${planId}, Duration: ${duration}`);
-        // For free trial, grant immediate access
-        if (planId === "community-freebie") {
-            const result = await mikrotik_rb951_1.rb951Manager.grantAccessByIP(clientIP, "30m");
-            return res.json(result);
-        }
-        // Validate phone number for paid plans
-        if (!phone || !phone.match(/^254\d{9}$/)) {
-            return res.json({
-                success: false,
-                message: "Valid phone number required (format: 254xxxxxxxxx)"
-            });
-        }
-        // Process M-Pesa payment
-        const paymentResult = await processMpesaPayment(phone, planId, clientIP);
-        res.json(paymentResult);
-    }
-    catch (error) {
-        logger_1.default.error("Payment processing error:", error);
-        res.status(500).json({
-            success: false,
-            message: "Server error processing payment"
-        });
-    }
-});
-// Check payment status
-app.post("/api/check-payment", async (req, res) => {
-    const { checkoutRequestId } = req.body;
-    if (!checkoutRequestId) {
-        return res.json({ success: false, message: "Checkout request ID required" });
-    }
-    try {
-        const paymentInfo = pendingPayments.get(checkoutRequestId);
-        if (!paymentInfo) {
-            return res.json({ success: false, message: "Payment not found" });
-        }
-        // Check if payment is too old (15 minutes timeout)
-        if (Date.now() - paymentInfo.timestamp > 15 * 60 * 1000) {
-            pendingPayments.delete(checkoutRequestId);
-            return res.json({ success: false, message: "Payment request expired" });
-        }
-        // Query M-Pesa for transaction status
-        const statusResponse = await (0, mpesaService_1.queryTransactionStatus)(checkoutRequestId);
-        if (statusResponse.ResultCode === "0") {
-            // Payment successful - grant access
-            const accessResult = await mikrotik_rb951_1.rb951Manager.grantAccessByIP(paymentInfo.ip, paymentInfo.duration);
-            // Remove from pending payments
-            pendingPayments.delete(checkoutRequestId);
-            res.json({
-                success: accessResult.success,
-                message: accessResult.success ? "Payment confirmed! Internet access granted." : accessResult.message,
-                paid: true
-            });
-        }
-        else if (statusResponse.ResultCode === "1032") {
-            // User cancelled
-            pendingPayments.delete(checkoutRequestId);
-            res.json({
-                success: false,
-                message: "Payment was cancelled",
-                cancelled: true
-            });
-        }
-        else if (statusResponse.ResultCode === "1037") {
-            // Timeout
-            pendingPayments.delete(checkoutRequestId);
-            res.json({
-                success: false,
-                message: "Payment request timed out",
-                timeout: true
-            });
-        }
-        else {
-            // Still pending or other status
-            res.json({
-                success: false,
-                message: "Payment is still being processed",
-                pending: true
-            });
-        }
-    }
-    catch (error) {
-        logger_1.default.error("Payment status check error:", error);
-        res.status(500).json({
-            success: false,
-            message: "Error checking payment status"
-        });
-    }
-});
-// M-Pesa callback endpoint
-app.post("/api/mpesa-callback", (req, res) => {
-    logger_1.default.info("M-Pesa callback received:", req.body);
-    try {
-        const { Body: { stkCallback } } = req.body;
-        const { CheckoutRequestID, ResultCode, ResultDesc } = stkCallback;
-        logger_1.default.info(`M-Pesa callback: ${CheckoutRequestID}, Result: ${ResultCode} - ${ResultDesc}`);
-        // Find pending payment
-        const paymentInfo = pendingPayments.get(CheckoutRequestID);
-        if (paymentInfo && ResultCode === 0) {
-            // Payment successful - grant access
-            mikrotik_rb951_1.rb951Manager
-                .grantAccessByIP(paymentInfo.ip, paymentInfo.duration)
-                .then(result => {
-                logger_1.default.info(`Access granted via callback for IP ${paymentInfo.ip}: ${result.message}`);
-            })
-                .catch(error => {
-                logger_1.default.error(`Failed to grant access via callback for IP ${paymentInfo.ip}:`, error);
-            });
-        }
-        // Always respond with success to M-Pesa
-        res.json({ ResultCode: 0, ResultDesc: "Success" });
-    }
-    catch (error) {
-        logger_1.default.error("M-Pesa callback processing error:", error);
-        res.json({ ResultCode: 1, ResultDesc: "Error processing callback" });
-    }
-});
-app.get("/api/session-status", async (req, res) => {
-    const clientIP = req.clientIP;
-    try {
-        const activeUsers = await mikrotik_rb951_1.rb951Manager.getActiveUsers();
-        const bindings = await mikrotik_rb951_1.rb951Manager.getActiveBindings();
-        const userSession = activeUsers.find((user) => user.address === clientIP);
-        const userBinding = bindings.find((binding) => binding.address === clientIP && binding.type === "bypassed");
-        if (userSession || userBinding) {
-            res.json({
-                hasActiveSession: true,
-                timeRemaining: parseInt(userSession?.["session-time-left"] || "1800"),
-                plan: { name: userSession?.comment || userBinding?.comment || "Active Session" },
-                expiry: userSession
-                    ? new Date(Date.now() + parseInt(userSession["session-time-left"] || "1800") * 1000)
-                    : new Date(Date.now() + 30 * 60 * 1000)
-            });
-        }
-        else {
-            res.json({ hasActiveSession: false, timeRemaining: 0, plan: null, expiry: null });
-        }
-    }
-    catch (error) {
-        logger_1.default.error("Session status error:", error);
-        res.json({ hasActiveSession: false, timeRemaining: 0, plan: null, expiry: null });
-    }
-});
-app.post("/api/disconnect", async (req, res) => {
-    const clientIP = req.clientIP;
-    try {
-        const result = await mikrotik_rb951_1.rb951Manager.disconnectUser(clientIP);
-        res.json(result);
-    }
-    catch (error) {
-        logger_1.default.error("Disconnect error:", error);
-        res.status(500).json({
-            success: false,
-            message: "Disconnect failed"
-        });
-    }
-});
-// Get plan prices
-app.get("/api/plans", (req, res) => {
-    res.json({
-        success: true,
-        plans: [
-            { id: "quick-surf", name: "Quick Surf", duration: "1Hr", price: 10, description: "Unlimited Data" },
-            { id: "quick-surf-4h", name: "Extended Surf", duration: "4Hrs", price: 30, description: "Unlimited Data" },
-            { id: "half-day-boost", name: "Half Day Boost", duration: "12Hrs", price: 40, description: "5GB Data Cap" },
-            { id: "daily-boost", name: "Daily Boost", duration: "24Hrs", price: 50, description: "5GB Data Cap" },
-            { id: "weekly-unlimited", name: "Weekly Unlimited", duration: "7d", price: 200, description: "Unlimited Data" },
-            { id: "community-freebie", name: "Community Freebie", duration: "30m", price: 0, description: "Essentials Only" }
-        ]
-    });
-});
-// Health check
-app.get("/api/health", (req, res) => {
-    res.json({
-        status: "OK",
-        timestamp: new Date().toISOString(),
-        server: `${SERVER_IP}:${PORT}`
-    });
-});
-// Clean up expired pending payments every 5 minutes
-setInterval(() => {
-    const now = Date.now();
-    for (const [checkoutId, payment] of pendingPayments.entries()) {
-        if (now - payment.timestamp > 15 * 60 * 1000) {
-            // 15 minutes
-            pendingPayments.delete(checkoutId);
-            logger_1.default.info(`Cleaned up expired payment: ${checkoutId}`);
-        }
-    }
-}, 5 * 60 * 1000);
-// Catch-all handler for React SPA
-app.get("*", (req, res) => {
-    res.sendFile(path_1.default.join(__dirname, "../../../frontend/build", "index.html"));
-});
-// Initialize server
-async function initializeServer() {
-    console.log(`🚀 Starting Hotspot Server on http://${SERVER_IP}:${PORT}`);
-    try {
-        const connectionTest = await mikrotik_rb951_1.rb951Manager.testConnection();
+        const connectionTest = await mikrotik_rb951_1.default.testConnection();
         if (connectionTest.success) {
-            console.log(`✅ MikroTik Connection: ${connectionTest.message}`);
-            console.log(`📋 Router Info:`, connectionTest.info);
+            logger_1.default.info("✅ MikroTik router connection established");
+            logger_1.default.info(`   Router: ${connectionTest.info?.identity || "Unknown"}`);
+            logger_1.default.info(`   Version: ${connectionTest.info?.version || "Unknown"}`);
         }
         else {
-            console.warn(`⚠️  MikroTik Connection Warning: ${connectionTest.message}`);
+            logger_1.default.error("❌ MikroTik connection failed:", connectionTest.message);
+            // Don't exit - allow server to start but log the issue
+            logger_1.default.warn("⚠️  Server starting without MikroTik connection");
         }
     }
     catch (error) {
-        console.error(`❌ MikroTik Connection Error:`, error);
+        logger_1.default.error("❌ MikroTik connection test failed:", error);
+        logger_1.default.warn("⚠️  Server starting without MikroTik connection");
     }
 }
-app.listen(PORT, SERVER_IP, () => {
-    initializeServer();
+// Store server instance for graceful shutdown
+let serverInstance = null;
+// Graceful shutdown handler
+async function gracefulShutdown(signal) {
+    logger_1.default.info(`🛑 Received ${signal}. Starting graceful shutdown...`);
+    // Close server
+    if (serverInstance) {
+        serverInstance.close(() => {
+            logger_1.default.info("🔌 HTTP server closed");
+        });
+    }
+    // Disconnect from MikroTik
+    try {
+        await mikrotik_rb951_1.default.disconnect();
+        logger_1.default.info("🔌 MikroTik connection closed");
+    }
+    catch (error) {
+        logger_1.default.error("Error closing MikroTik connection:", error);
+    }
+    // Close database connection
+    try {
+        await prisma.$disconnect();
+        logger_1.default.info("🔌 Database connection closed");
+    }
+    catch (error) {
+        logger_1.default.error("Error closing database connection:", error);
+    }
+    logger_1.default.info("✅ Graceful shutdown completed");
+    process.exit(0);
+}
+// Initialize server
+async function startServer() {
+    try {
+        // Validate environment
+        validateEnvironment();
+        // Test connections
+        await testDatabaseConnection();
+        await testMikroTikConnection();
+        // Start background monitoring
+        await (0, paymentController_1.startDataCapMonitoring)();
+        logger_1.default.info("📊 Background monitoring started");
+        // Start server
+        const PORT = parseInt(process.env.SERVER_PORT || "5000", 10);
+        const HOST = process.env.SERVER_IP || "0.0.0.0";
+        const server = app_1.default.listen(PORT, HOST, () => {
+            logger_1.default.info(`🚀 Hotspot server running on ${HOST}:${PORT}`);
+            logger_1.default.info(`🌐 Portal available at: https://hotspot.0xzile.sbs`);
+            logger_1.default.info(`📱 Environment: ${process.env.NODE_ENV || "development"}`);
+            // Log system info
+            logger_1.default.info(`💾 Memory usage: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)} MB`);
+            logger_1.default.info(`⏱️  Uptime: ${Math.round(process.uptime())} seconds`);
+        });
+        // Store server instance for graceful shutdown
+        serverInstance = server;
+        // Handle server errors
+        server.on("error", (error) => {
+            if (error.syscall !== "listen") {
+                throw error;
+            }
+            const bind = typeof PORT === "string" ? "Pipe " + PORT : "Port " + PORT;
+            switch (error.code) {
+                case "EACCES":
+                    logger_1.default.error(`${bind} requires elevated privileges`);
+                    process.exit(1);
+                case "EADDRINUSE":
+                    logger_1.default.error(`${bind} is already in use`);
+                    process.exit(1);
+                default:
+                    throw error;
+            }
+        });
+        // Setup graceful shutdown handlers
+        process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+        process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+        // Handle uncaught exceptions
+        process.on("uncaughtException", error => {
+            logger_1.default.error("❌ Uncaught Exception:", error);
+            gracefulShutdown("uncaughtException");
+        });
+        process.on("unhandledRejection", (reason, promise) => {
+            logger_1.default.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
+            gracefulShutdown("unhandledRejection");
+        });
+        return server;
+    }
+    catch (error) {
+        logger_1.default.error("❌ Failed to start server:", error);
+        process.exit(1);
+    }
+}
+// Export server instance for testing
+exports.server = startServer();
+// Health check endpoint for monitoring
+process.on("message", message => {
+    if (message === "health-check") {
+        process.send({
+            status: "healthy",
+            uptime: process.uptime(),
+            memory: process.memoryUsage(),
+            timestamp: new Date().toISOString()
+        });
+    }
 });
