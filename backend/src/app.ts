@@ -3,7 +3,15 @@ import cors from "cors";
 import path from "path";
 import rateLimit from "express-rate-limit";
 import logger from "./utils/logger";
-import { showPortal, initiatePayment, mpesaCallback, getSessionStatus } from "./controllers/paymentController";
+import {
+  showPortal,
+  initiatePayment,
+  mpesaCallback,
+  getSessionStatus,
+  getSystemStatus,
+  grantFreeAccess,
+  disconnectUser
+} from "./controllers/paymentController";
 
 const app = express();
 
@@ -27,8 +35,10 @@ app.use(
 app.get("/", showPortal);
 app.post("/api/pay", initiatePayment);
 app.post("/api/mpesa_callback", mpesaCallback);
-app.get("/api/session-status", getSessionStatus); // New: For frontend polling
-
+app.get("/api/session-status", getSessionStatus);
+app.post("/api/disconnect", disconnectUser);
+app.get("/api/system-status", getSystemStatus);
+app.post("/api/grant-free-access", grantFreeAccess);
 // Health check (for monitoring/uptime tools)
 app.get("/health", (req: express.Request, res: express.Response) => {
   res.status(200).json({ status: "OK", uptime: process.uptime() });

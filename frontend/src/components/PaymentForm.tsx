@@ -7,60 +7,46 @@ const PaymentForm = () => {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // Updated plans to match backend duration mapping
+  // Updated to match backend PLANS array exactly
   const plans = [
+    {
+      id: "community-freebie",
+      name: "Community Freebie",
+      displayDuration: "30 Minutes",
+      price: 0,
+      description: "100MB Data Cap",
+      popular: false
+    },
     {
       id: "quick-surf",
       name: "Quick Surf",
-      duration: "1Hr", // Changed from "1 Hour" to match backend
       displayDuration: "1 Hour",
       price: 10,
       description: "Unlimited Data",
       popular: false
     },
     {
-      id: "quick-surf-4h",
-      name: "Extended Surf",
-      duration: "4Hrs", // Added 4-hour option
-      displayDuration: "4 Hours",
-      price: 30,
-      description: "Unlimited Data",
-      popular: false
-    },
-    {
-      id: "half-day-boost",
-      name: "Half Day Boost",
-      duration: "12Hrs", // Added 12-hour option
-      displayDuration: "12 Hours",
-      price: 40,
-      description: "5GB Data Cap",
-      popular: false
-    },
-    {
       id: "daily-boost",
       name: "Daily Boost",
-      duration: "24Hrs", // Changed from "24 Hours" to match backend
       displayDuration: "24 Hours",
       price: 50,
       description: "5GB Data Cap",
       popular: true
     },
     {
-      id: "weekly-unlimited",
-      name: "Weekly Unlimited",
-      duration: "7d", // Using backend format
-      displayDuration: "7 Days",
-      price: 200,
-      description: "Unlimited Data",
+      id: "family-share",
+      name: "Family Share",
+      displayDuration: "24 Hours",
+      price: 80,
+      description: "10GB Shared Data",
       popular: false
     },
     {
-      id: "community-freebie",
-      name: "Community Freebie",
-      duration: "30m", // Using backend format for 30 minutes
-      displayDuration: "30 Min/Day",
-      price: 0,
-      description: "Essentials Only",
+      id: "weekly-unlimited",
+      name: "Weekly Unlimited",
+      displayDuration: "7 Days",
+      price: 200,
+      description: "Unlimited Data (5Mbps)",
       popular: false
     }
   ];
@@ -68,32 +54,97 @@ const PaymentForm = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    try {
-      const selectedPlan = plans.find(p => p.id === planId);
-      const response = await fetch("/api/pay", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          planId,
-          phone,
-          duration: selectedPlan?.duration // Send the backend-compatible duration
-        })
-      });
-      const data = await response.json();
-      setMessage(data.message || data.error);
 
-      // If successful, reload to check session status
-      if (data.success) {
-        setTimeout(() => {
-          window.location.reload();
-        }, 2000);
+    try {
+      // For free plan, use the grant-free-access endpoint
+      if (planId === "community-freebie") {
+        // Get MikroTik parameters from URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const userIP = urlParams.get("ip") || localStorage.getItem("userIP");
+        const userMAC = urlParams.get("mac") || localStorage.getItem("userMAC");
+
+        const response = await fetch("/api/grant-free-access", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ip: userIP,
+            mac: userMAC,
+            duration: "30m"
+          })
+        });
+
+        const data = await response.json();
+        setMessage(data.message || data.error);
+
+        if (data.success) {
+          setTimeout(() => {
+            window.location.href = "https://google.com";
+          }, 2000);
+        }
+      } else {
+        // For paid plans, use the regular payment endpoint
+        const response = await fetch("/api/pay", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            planId,
+            phone
+          })
+        });
+
+        const data = await response.json();
+        setMessage(data.message || data.error);
+
+        if (data.success && data.checkoutRequestId) {
+          // Start polling for payment status
+          pollPaymentStatus(data.checkoutRequestId);
+        } else if (data.success) {
+          // Immediate success (shouldn't happen for paid plans)
+          setTimeout(() => {
+            window.location.reload();
+          }, 2000);
+        }
       }
     } catch (err) {
       setMessage("Error initiating payment");
-      console.error("Unable to proceed to payment", err);
+      console.error("Payment error:", err);
     } finally {
       setLoading(false);
     }
+  };
+
+  const pollPaymentStatus = (checkoutRequestId: string) => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const userIP = urlParams.get("ip") || localStorage.getItem("userIP");
+
+    const maxAttempts = 30; // 2.5 minutes
+    let attempts = 0;
+
+    const interval = setInterval(async () => {
+      attempts++;
+
+      try {
+        const response = await fetch(`/api/session-status?ip=${userIP}&checkoutRequestId=${checkoutRequestId}`);
+        const result = await response.json();
+
+        if (result.hasActiveSession) {
+          clearInterval(interval);
+          setMessage("✅ Payment successful! Internet access granted.");
+          setTimeout(() => {
+            window.location.href = "https://google.com";
+          }, 2000);
+        } else if (attempts >= maxAttempts) {
+          clearInterval(interval);
+          setMessage("⏰ Payment timeout. Please try again.");
+        }
+      } catch (error) {
+        console.error("Status check error:", error);
+        if (attempts >= maxAttempts) {
+          clearInterval(interval);
+          setMessage("❌ Unable to verify payment status.");
+        }
+      }
+    }, 5000); // Check every 5 seconds
   };
 
   return (
@@ -123,7 +174,7 @@ const PaymentForm = () => {
                 <div className="plan-content">
                   <div className="plan-header">
                     <span className="plan-duration">{planOption.displayDuration}</span>
-                    <span className="plan-price">KSh {planOption.price}</span>
+                    <span className="plan-price">{planOption.price === 0 ? "FREE" : `KSh ${planOption.price}`}</span>
                   </div>
                   <span className="plan-description">{planOption.description}</span>
                   {planOption.popular && <span className="popular-badge">Most Popular</span>}
@@ -136,26 +187,24 @@ const PaymentForm = () => {
           </div>
         </div>
 
-        {/* Phone Input */}
-        <div className="phone-section">
-          <label className="input-label">
-            <Phone size={16} />
-            M-Pesa Phone Number
-          </label>
-          <input
-            type="tel"
-            placeholder="2547xxxxxxxx"
-            value={phone}
-            onChange={e => setPhone(e.target.value)}
-            required={planId !== "community-freebie"}
-            className="phone-input"
-          />
-          <p className="input-hint">
-            {planId === "community-freebie"
-              ? "No phone number required for free trial"
-              : "Enter your Safaricom number starting with 254"}
-          </p>
-        </div>
+        {/* Phone Input - Only show for paid plans */}
+        {planId && planId !== "community-freebie" && (
+          <div className="phone-section">
+            <label className="input-label">
+              <Phone size={16} />
+              M-Pesa Phone Number
+            </label>
+            <input
+              type="tel"
+              placeholder="254712345678"
+              value={phone}
+              onChange={e => setPhone(e.target.value)}
+              required
+              className="phone-input"
+            />
+            <p className="input-hint">Enter your Safaricom number starting with 254</p>
+          </div>
+        )}
 
         {/* Submit Button */}
         <button

@@ -62,6 +62,97 @@ function getUserIP(req: any): string {
   return req.socket.remoteAddress || req.ip || "unknown";
 }
 
+//Free Access
+export async function grantFreeAccess(req: Request, res: Response) {
+  try {
+    const { ip, mac, duration } = req.body;
+
+    if (!ip) {
+      return res.status(400).json({
+        success: false,
+        message: "IP address required"
+      });
+    }
+
+    logger.info(`Granting free access to IP: ${ip}, MAC: ${mac}, Duration: ${duration}`);
+
+    // Check for existing active session
+    const existingSession = await prisma.session.findFirst({
+      where: {
+        OR: [{ ip }, { mac: mac && mac !== "00:00:00:00:00:00" ? mac : undefined }].filter(Boolean),
+        paid: true,
+        expiry: { gt: new Date() }
+      }
+    });
+
+    if (existingSession) {
+      return res.status(400).json({
+        success: false,
+        message: "You already have an active session"
+      });
+    }
+
+    // Create free session using your existing PLANS array
+    const freePlan = PLANS.find(p => p.id === "community-freebie");
+    if (!freePlan) {
+      return res.status(500).json({
+        success: false,
+        message: "Free plan not available"
+      });
+    }
+
+    const expiry = new Date(Date.now() + freePlan.hours * 60 * 60 * 1000);
+
+    const session = await prisma.session.create({
+      data: {
+        mac: mac || "00:00:00:00:00:00",
+        ip,
+        planName: freePlan.name,
+        planHours: freePlan.hours,
+        dataCap: freePlan.dataCap,
+        expiry,
+        paid: true
+      }
+    });
+
+    // Grant access using your existing grantAccess function
+    const accessResult = await grantAccess(
+      ip,
+      true, // is limited
+      freePlan.dataCap,
+      freePlan.hours.toString()
+    );
+
+    if (accessResult.success) {
+      logger.info(`✅ Free access granted to ${ip} for ${duration}`);
+      res.json({
+        success: true,
+        message: "🎁 Free access granted! Enjoy your trial.",
+        session: {
+          id: session.id,
+          planName: session.planName,
+          expiry: session.expiry,
+          dataCap: session.dataCap
+        }
+      });
+    } else {
+      // Clean up session if access grant failed
+      await prisma.session.delete({ where: { id: session.id } });
+      logger.error(`❌ Failed to grant free access to ${ip}: ${accessResult.message}`);
+      res.status(500).json({
+        success: false,
+        message: accessResult.message
+      });
+    }
+  } catch (error: any) {
+    logger.error("Free access grant error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to grant access"
+    });
+  }
+}
+
 // Grant access through MikroTik
 async function grantAccess(
   ip: string,
@@ -164,12 +255,67 @@ async function getDataUsage(
     return { uploaded: 0, downloaded: 0, total: 0, totalMB: 0 };
   }
 }
+export async function disconnectUser(req: Request, res: Response) {
+  const userIp = getUserIP(req);
 
-// Main controller functions
-export async function showPortal(req: Request, res: Response) {
-  res.sendFile("index.html", { root: "public" });
+  try {
+    const userMac = await rb951Manager.getUserMac(userIp);
+
+    const session = await prisma.session.findFirst({
+      where: {
+        OR: [{ ip: userIp }, { mac: userMac !== "00:00:00:00:00:00" ? userMac : undefined }].filter(Boolean),
+        paid: true,
+        expiry: { gt: new Date() }
+      }
+    });
+
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: "No active session found"
+      });
+    }
+
+    // Disconnect from MikroTik using your existing rb951Manager
+    const disconnectResult = await rb951Manager.disconnectUser(userIp);
+
+    // Expire the session in database
+    await prisma.session.update({
+      where: { id: session.id },
+      data: { expiry: new Date() }
+    });
+
+    logger.info(`🚪 User ${userIp} disconnected successfully`);
+
+    res.json({
+      success: true,
+      message: "Session disconnected successfully",
+      disconnectResult
+    });
+  } catch (error: any) {
+    logger.error("Disconnect session error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error"
+    });
+  }
 }
+export async function showPortal(req: Request, res: Response) {
+  try {
+    // Extract MikroTik parameters for logging
+    const { mac, ip, username, "link-login": linkLogin, "link-orig": linkOrig } = req.query;
 
+    if (ip && mac) {
+      logger.info(`Portal access from IP: ${ip}, MAC: ${mac}`);
+    }
+
+    // Serve the React app (built with Vite)
+    res.sendFile("index.html", { root: "public" });
+  } catch (error) {
+    logger.error("Portal display error:", error);
+    res.status(500).json({ error: "Portal temporarily unavailable" });
+  }
+}
 export async function getPlans(req: Request, res: Response) {
   try {
     res.json({

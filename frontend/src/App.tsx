@@ -1,37 +1,55 @@
 import PaymentForm from "./components/PaymentForm";
 import { Wifi, Shield, Zap, CreditCard } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import ExpirationModal from "./Modal/ExpirationModal";
 import WelcomeModal from "./Modal/WelcomeModal";
 import FreeDurationTimer from "./components/Duration";
 import { useSessionStatus } from "./hooks/useSessionStatus";
 
 function App() {
-  const [showWelcomeModal, setShowWelcomeModal] = useState(true);
+  const [showWelcomeModal, setShowWelcomeModal] = useState(false);
   const [trialExpired, setTrialExpired] = useState(false);
   const { status, loading } = useSessionStatus();
 
+  // Store MikroTik parameters on component mount
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const userIP = urlParams.get("ip");
+    const userMAC = urlParams.get("mac");
+
+    if (userIP) localStorage.setItem("userIP", userIP);
+    if (userMAC) localStorage.setItem("userMAC", userMAC);
+
+    // Show welcome modal only for new users (no active session)
+    if (!loading && !status.hasActiveSession) {
+      setShowWelcomeModal(true);
+    }
+  }, [loading, status.hasActiveSession]);
+
   const handleAcceptFreeTrial = async () => {
     try {
-      const response = await fetch("/api/pay", {
+      const userIP = localStorage.getItem("userIP");
+      const userMAC = localStorage.getItem("userMAC");
+
+      const response = await fetch("/api/grant-free-access", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          planId: "community-freebie",
+          ip: userIP,
+          mac: userMAC,
           duration: "30m"
         })
       });
+
       const data = await response.json();
-      console.log("API Response:", data);
 
       if (data.success) {
         setShowWelcomeModal(false);
-        // Reload to check session status
         setTimeout(() => {
-          window.location.reload();
+          window.location.href = "https://google.com";
         }, 1000);
       } else {
-        alert("Error: " + (data.message || data.error || "Unknown error"));
+        alert("Error: " + (data.message || "Unknown error"));
       }
     } catch (error) {
       console.error("Fetch error:", error);
@@ -59,8 +77,14 @@ function App() {
 
   const handleDisconnect = async () => {
     try {
-      await fetch("/api/disconnect", { method: "POST" });
+      const userIP = localStorage.getItem("userIP");
+      await fetch("/api/disconnect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ip: userIP })
+      });
       console.log("User disconnected");
+      localStorage.clear(); // Clear stored parameters
       window.location.reload();
     } catch (error) {
       console.error("Disconnect error:", error);
@@ -96,6 +120,30 @@ function App() {
               {Math.floor(status.timeRemaining / 3600)}h {Math.floor((status.timeRemaining % 3600) / 60)}m
             </span>
           </div>
+
+          {/* Show data usage if available */}
+          {status.dataUsage && (
+            <>
+              <div className="session-detail">
+                <span className="label">Data Used:</span>
+                <span className="value">
+                  {status.dataUsage?.totalMB}MB
+                  {status.dataUsage?.remainingMB !== null && ` / ${status.plan?.dataCap}MB`}
+                </span>
+              </div>
+
+              {status.dataUsage?.percentUsed !== null && (
+                <div className="data-progress">
+                  <div className="progress-bar">
+                    <div
+                      className="progress-fill"
+                      style={{ width: `${Math.min(100, status.dataUsage?.percentUsed)}%` }}></div>
+                  </div>
+                  <span className="progress-text">{status.dataUsage?.percentUsed.toFixed(1)}% used</span>
+                </div>
+              )}
+            </>
+          )}
 
           {status.expiry && (
             <div className="session-detail">
