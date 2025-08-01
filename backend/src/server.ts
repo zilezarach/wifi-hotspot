@@ -4,6 +4,7 @@ import logger from "./utils/logger";
 import { PrismaClient } from "@prisma/client";
 import { startDataCapMonitoring } from "./controllers/paymentController";
 import rb951Manager from "./services/mikrotik-rb951";
+import { Server } from "http";
 
 // Load environment variables first
 dotenv.config();
@@ -71,14 +72,19 @@ async function testMikroTikConnection() {
   }
 }
 
+// Store server instance for graceful shutdown
+let serverInstance: Server | null = null;
+
 // Graceful shutdown handler
 async function gracefulShutdown(signal: string) {
   logger.info(`🛑 Received ${signal}. Starting graceful shutdown...`);
 
   // Close server
-  (await server).close(() => {
-    logger.info("🔌 HTTP server closed");
-  });
+  if (serverInstance) {
+    serverInstance.close(() => {
+      logger.info("🔌 HTTP server closed");
+    });
+  }
 
   // Disconnect from MikroTik
   try {
@@ -111,11 +117,11 @@ async function startServer() {
     await testMikroTikConnection();
 
     // Start background monitoring
-    const monitoring = await startDataCapMonitoring();
+    await startDataCapMonitoring();
     logger.info("📊 Background monitoring started");
 
     // Start server
-    const PORT = process.env.SERVER_PORT || 5000;
+    const PORT = parseInt(process.env.SERVER_PORT || "5000", 10);
     const HOST = process.env.SERVER_IP || "0.0.0.0";
 
     const server = app.listen(PORT, HOST, () => {
@@ -127,6 +133,9 @@ async function startServer() {
       logger.info(`💾 Memory usage: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)} MB`);
       logger.info(`⏱️  Uptime: ${Math.round(process.uptime())} seconds`);
     });
+
+    // Store server instance for graceful shutdown
+    serverInstance = server;
 
     // Handle server errors
     server.on("error", (error: any) => {
@@ -140,11 +149,9 @@ async function startServer() {
         case "EACCES":
           logger.error(`${bind} requires elevated privileges`);
           process.exit(1);
-          break;
         case "EADDRINUSE":
           logger.error(`${bind} is already in use`);
           process.exit(1);
-          break;
         default:
           throw error;
       }
