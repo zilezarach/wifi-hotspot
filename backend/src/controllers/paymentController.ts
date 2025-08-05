@@ -843,7 +843,20 @@ export async function mpesaCallback(req: Request, res: Response) {
 }
 
 // Background job to monitor data caps and expired sessions
+
 export async function startDataCapMonitoring() {
+  // Test if database schema exists before starting monitoring
+  try {
+    await prisma.session.findFirst({ take: 1 });
+  } catch (error: any) {
+    if (error.code === "P2021") {
+      logger.error("❌ Database schema not ready. Skipping monitoring startup.");
+      logger.error("Please run: npx prisma migrate deploy");
+      return { monitoringInterval: null, cleanupInterval: null };
+    }
+    throw error;
+  }
+
   const monitoringInterval = setInterval(async () => {
     try {
       const activeSessions = await prisma.session.findMany({
@@ -873,7 +886,12 @@ export async function startDataCapMonitoring() {
           }
         }
       }
-    } catch (error) {
+    } catch (error: any) {
+      // Handle table not existing error gracefully
+      if (error.code === "P2021") {
+        logger.warn("⚠️  Database table missing during monitoring - skipping this cycle");
+        return;
+      }
       logger.error("Data cap monitoring error:", error);
     }
   }, 60000); // Check every minute
@@ -893,7 +911,11 @@ export async function startDataCapMonitoring() {
       for (const session of expiredSessions) {
         await rb951Manager.disconnectUser(session.ip);
       }
-    } catch (error) {
+    } catch (error: any) {
+      if (error.code === "P2021") {
+        logger.warn("⚠️  Database table missing during cleanup - skipping this cycle");
+        return;
+      }
       logger.error("Session cleanup error:", error);
     }
   }, 300000); // Every 5 minutes
@@ -902,7 +924,6 @@ export async function startDataCapMonitoring() {
 
   return { monitoringInterval, cleanupInterval };
 }
-
 // System status endpoint
 export async function getSystemStatus(req: Request, res: Response) {
   try {
