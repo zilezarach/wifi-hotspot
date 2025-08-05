@@ -10,7 +10,7 @@ import {
   getSessionStatus,
   getSystemStatus,
   grantFreeAccess,
-  disconnectUser
+  disconnectUser,
 } from "./controllers/paymentController";
 
 const app = express();
@@ -20,10 +20,10 @@ const paymentLimiter = rateLimit({
   message: { error: "Too many requests – try again later" },
   standardHeaders: true,
   legacyHeaders: false, // Add this
-  skip: req => {
+  skip: (req) => {
     // Skip rate limiting for health checks
     return req.path === "/health";
-  }
+  },
 });
 // Middleware
 app.use(cors({ origin: "*" }));
@@ -34,7 +34,6 @@ app.set("trust proxy", 1);
 app.post("/api/pay", paymentLimiter, initiatePayment);
 
 // API Routes FIRST (before static files)
-app.post("/api/pay", initiatePayment);
 app.post("/api/mpesa_callback", mpesaCallback);
 app.get("/api/session-status", getSessionStatus);
 app.post("/api/disconnect", disconnectUser);
@@ -53,7 +52,7 @@ app.get("/portal", showPortal);
 app.use(
   express.static(path.join(__dirname, "../public"), {
     index: false, // Don't automatically serve index.html
-    maxAge: "1d"
+    maxAge: "1d",
   })
 );
 
@@ -69,9 +68,16 @@ app.get("*", (req, res) => {
 });
 
 // Global error handler
-app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  logger.error(`Error on ${req.method} ${req.url}:`, err);
-  res.status(500).json({ error: "Server error – please try again" });
-});
+app.use(
+  (
+    err: Error,
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+  ) => {
+    logger.error(`Error on ${req.method} ${req.url}:`, err);
+    res.status(500).json({ error: "Server error – please try again" });
+  }
+);
 
 export default app;
