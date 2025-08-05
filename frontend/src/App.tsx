@@ -8,10 +8,28 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 
 function App() {
   const [trialExpired, setTrialExpired] = useState(false);
+  const [isExtendingTrial, setIsExtendingTrial] = useState(false);
   const { state, disconnectSession, refreshSession } = useSession();
   const initRef = useRef(false);
 
-  // Store MikroTik parameters on component mount
+  // Safe localStorage operations
+  const safeSetStorage = (key: string, value: string) => {
+    try {
+      localStorage.setItem(key, value);
+    } catch (error) {
+      console.warn(`Failed to store ${key}:`, error);
+    }
+  };
+
+  const safeGetStorage = (key: string): string | null => {
+    try {
+      return localStorage.getItem(key);
+    } catch (error) {
+      console.warn(`Failed to get ${key}:`, error);
+      return null;
+    }
+  };
+
   useEffect(() => {
     if (initRef.current) return;
     initRef.current = true;
@@ -20,19 +38,17 @@ function App() {
     const userIP = urlParams.get("ip");
     const userMAC = urlParams.get("mac");
 
-    // Store parameters if available and not already stored
-    if (userIP && !localStorage.getItem("userIP")) {
-      localStorage.setItem("userIP", userIP);
+    if (userIP && !safeGetStorage("userIP")) {
+      safeSetStorage("userIP", userIP);
     }
-    if (userMAC && !localStorage.getItem("userMAC")) {
-      localStorage.setItem("userMAC", userMAC);
+    if (userMAC && !safeGetStorage("userMAC")) {
+      safeSetStorage("userMAC", userMAC);
     }
 
-    // Also store other MikroTik parameters for potential use
     const linkOrig = urlParams.get("link-orig");
     const linkLogin = urlParams.get("link-login");
-    if (linkOrig) localStorage.setItem("link-orig", linkOrig);
-    if (linkLogin) localStorage.setItem("link-login", linkLogin);
+    if (linkOrig) safeSetStorage("link-orig", linkOrig);
+    if (linkLogin) safeSetStorage("link-login", linkLogin);
   }, []);
 
   const handleTrialExpired = () => {
@@ -44,9 +60,13 @@ function App() {
   };
 
   const handleExtendTrial = async () => {
+    if (isExtendingTrial) return; // Prevent double-clicks
+
+    setIsExtendingTrial(true);
+
     try {
-      const userIP = localStorage.getItem("userIP");
-      const userMAC = localStorage.getItem("userMAC");
+      const userIP = safeGetStorage("userIP");
+      const userMAC = safeGetStorage("userMAC");
 
       if (!userIP) {
         alert("Unable to determine your device. Please refresh the page.");
@@ -55,7 +75,10 @@ function App() {
 
       const response = await fetch("/api/grant-free-access", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-cache",
+        },
         body: JSON.stringify({
           ip: userIP,
           mac: userMAC,
@@ -63,27 +86,49 @@ function App() {
         }),
       });
 
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
       const data = await response.json();
 
       if (data.success) {
         setTrialExpired(false);
         await refreshSession();
+
+        // Improved redirect logic
+        const redirectUrl = safeGetStorage("link-orig") || "https://google.com";
+
         setTimeout(() => {
-          window.location.replace("https://google.com");
+          try {
+            window.location.replace(redirectUrl);
+          } catch (error) {
+            console.error("Redirect failed:", error);
+            window.location.replace("https://google.com");
+          }
         }, 2000);
       } else {
-        alert("Error: " + (data.message || "Failed to extend trial"));
+        throw new Error(data.message || "Failed to extend trial");
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Extend trial error:", error);
-      alert("Network error extending trial.");
+      alert("Error extending trial: " + (error.message || "Network error"));
+    } finally {
+      setIsExtendingTrial(false);
     }
   };
 
   const handleDisconnect = async () => {
     try {
       await disconnectSession();
-      localStorage.clear();
+
+      // Safe localStorage clear
+      try {
+        localStorage.clear();
+      } catch (error) {
+        console.warn("Failed to clear localStorage:", error);
+      }
+
       window.location.reload();
     } catch (error) {
       console.error("Disconnect error:", error);
@@ -91,7 +136,7 @@ function App() {
     }
   };
 
-  // Loading state
+  // Loading state with timeout
   if (state.loading) {
     return (
       <div className="loading-screen">
@@ -106,22 +151,34 @@ function App() {
     );
   }
 
-  // Error state
+  // Error state with retry
   if (state.error) {
     return (
       <div className="error-screen">
         <AlertCircle size={48} color="#ef4444" />
         <h2>Connection Error</h2>
         <p>{state.error}</p>
-        <button onClick={() => refreshSession()} className="retry-button">
-          Try Again
-        </button>
+        <div className="error-actions">
+          <button onClick={() => refreshSession()} className="retry-button">
+            Try Again
+          </button>
+          <button
+            onClick={() => window.location.reload()}
+            className="reload-button"
+          >
+            Reload Page
+          </button>
+        </div>
       </div>
     );
   }
 
-  // Active session view
+  // Active session view with better data display
   if (state.hasActiveSession) {
+    const timeHours = Math.floor(state.timeRemaining / 3600);
+    const timeMinutes = Math.floor((state.timeRemaining % 3600) / 60);
+    const timeSeconds = state.timeRemaining % 60;
+
     return (
       <div className="active-session">
         <div className="session-header">
@@ -142,12 +199,12 @@ function App() {
           <div className="session-detail">
             <span className="label">Time Remaining:</span>
             <span className="value time-remaining">
-              {Math.floor(state.timeRemaining / 3600)}h{" "}
-              {Math.floor((state.timeRemaining % 3600) / 60)}m
+              {timeHours > 0 && `${timeHours}h `}
+              {timeMinutes > 0 && `${timeMinutes}m `}
+              {timeHours === 0 && timeMinutes === 0 && `${timeSeconds}s`}
             </span>
           </div>
 
-          {/* Show data usage if available */}
           {state.dataUsage && (
             <>
               <div className="session-detail">
@@ -155,7 +212,8 @@ function App() {
                 <span className="value">
                   {state.dataUsage.totalMB.toFixed(1)}MB
                   {state.dataUsage.remainingMB !== null &&
-                    ` / ${state.plan?.dataCap}MB`}
+                    state.plan?.dataCap &&
+                    ` / ${state.plan.dataCap}MB`}
                 </span>
               </div>
 
@@ -215,6 +273,7 @@ function App() {
             onPurchase={handlePurchasePlan}
             onExtend={handleExtendTrial}
             onDisconnect={handleDisconnect}
+            isExtending={isExtendingTrial}
           />
         )}
       </div>
@@ -229,10 +288,10 @@ function App() {
           onPurchase={handlePurchasePlan}
           onExtend={handleExtendTrial}
           onDisconnect={handleDisconnect}
+          isExtending={isExtendingTrial}
         />
       )}
 
-      {/* Header */}
       <div className="header">
         <div className="logo-container">
           <Wifi size={32} />
@@ -244,7 +303,6 @@ function App() {
         </p>
       </div>
 
-      {/* Features */}
       <div className="features">
         <div className="feature">
           <Zap size={24} />
@@ -263,10 +321,8 @@ function App() {
         </div>
       </div>
 
-      {/* Payment Form */}
       <PaymentForm />
 
-      {/* Footer */}
       <div className="footer">
         <p>Powered by Zile and M-Pesa</p>
         <div className="footer-links">
@@ -285,7 +341,6 @@ function App() {
   );
 }
 
-// Wrap with providers and error boundary
 function AppWithProviders() {
   return (
     <ErrorBoundary>

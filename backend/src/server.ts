@@ -21,15 +21,18 @@ const requiredEnvVars = [
   "MPESA_CONSUMER_KEY",
   "MPESA_CONSUMER_SECRET",
   "MPESA_SHORTCODE",
-  "MPESA_PASSKEY"
+  "MPESA_PASSKEY",
+  "NODE_ENV",
+  "SERVER_PORT",
+  "MPESA_CALLBACK_URL",
 ];
 
 function validateEnvironment() {
-  const missing = requiredEnvVars.filter(varName => !process.env[varName]);
+  const missing = requiredEnvVars.filter((varName) => !process.env[varName]);
 
   if (missing.length > 0) {
     logger.error("❌ Missing required environment variables:");
-    missing.forEach(varName => logger.error(`   - ${varName}`));
+    missing.forEach((varName) => logger.error(`   - ${varName}`));
     process.exit(1);
   } else {
     logger.info("✅ All required environment variables are set");
@@ -130,7 +133,11 @@ async function startServer() {
       logger.info(`📱 Environment: ${process.env.NODE_ENV || "development"}`);
 
       // Log system info
-      logger.info(`💾 Memory usage: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)} MB`);
+      logger.info(
+        `💾 Memory usage: ${Math.round(
+          process.memoryUsage().heapUsed / 1024 / 1024
+        )} MB`
+      );
       logger.info(`⏱️  Uptime: ${Math.round(process.uptime())} seconds`);
     });
 
@@ -162,7 +169,7 @@ async function startServer() {
     process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
     // Handle uncaught exceptions
-    process.on("uncaughtException", error => {
+    process.on("uncaughtException", (error) => {
       logger.error("❌ Uncaught Exception:", error);
       gracefulShutdown("uncaughtException");
     });
@@ -183,13 +190,13 @@ async function startServer() {
 export const server = startServer();
 
 // Health check endpoint for monitoring
-process.on("message", message => {
+process.on("message", (message) => {
   if (message === "health-check") {
     process.send!({
       status: "healthy",
       uptime: process.uptime(),
       memory: process.memoryUsage(),
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
   }
 });

@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from "react";
+import { useCallback, useRef, useState, useEffect } from "react";
 
 interface PaymentPollingState {
   isPolling: boolean;
@@ -14,7 +14,8 @@ export const usePaymentPolling = () => {
   });
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
-  const maxAttempts = 24; // 2 minutes at 5s intervals
+  const attemptsRef = useRef(0); // Fix stale closure
+  const maxAttempts = 24;
 
   const cleanup = useCallback(() => {
     if (intervalRef.current) {
@@ -22,6 +23,7 @@ export const usePaymentPolling = () => {
       intervalRef.current = null;
     }
     setState((prev) => ({ ...prev, isPolling: false }));
+    attemptsRef.current = 0;
   }, []);
 
   const startPolling = useCallback(
@@ -31,17 +33,26 @@ export const usePaymentPolling = () => {
       onError: (error: string) => void
     ) => {
       if (intervalRef.current) {
-        cleanup(); // Stop any existing polling
+        cleanup();
       }
 
       setState({ isPolling: true, error: null, attempts: 0 });
+      attemptsRef.current = 0;
 
       intervalRef.current = setInterval(async () => {
-        setState((prev) => ({ ...prev, attempts: prev.attempts + 1 }));
+        attemptsRef.current += 1;
+        setState((prev) => ({ ...prev, attempts: attemptsRef.current }));
 
         try {
           const response = await fetch(
-            `/api/session-status?checkoutRequestId=${checkoutRequestId}`
+            `/api/session-status?checkoutRequestId=${checkoutRequestId}`,
+            {
+              method: "GET",
+              headers: {
+                "Cache-Control": "no-cache",
+                Pragma: "no-cache",
+              },
+            }
           );
 
           if (!response.ok) {
@@ -56,7 +67,7 @@ export const usePaymentPolling = () => {
             return;
           }
 
-          if (state.attempts >= maxAttempts) {
+          if (attemptsRef.current >= maxAttempts) {
             cleanup();
             onError(
               "Payment verification timeout. Please check your M-Pesa messages or try again."
@@ -70,11 +81,10 @@ export const usePaymentPolling = () => {
         }
       }, 5000);
     },
-    [cleanup, maxAttempts, state.attempts]
+    [cleanup, maxAttempts]
   );
 
-  // Cleanup on unmount
-  React.useEffect(() => {
+  useEffect(() => {
     return cleanup;
   }, [cleanup]);
 
@@ -82,6 +92,6 @@ export const usePaymentPolling = () => {
     ...state,
     startPolling,
     cleanup,
-    timeRemaining: Math.max(0, (maxAttempts - state.attempts) * 5), // seconds remaining
+    timeRemaining: Math.max(0, (maxAttempts - state.attempts) * 5),
   };
 };

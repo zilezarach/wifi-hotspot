@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import axios from "axios";
 
 interface SessionPlan {
   name: string;
@@ -31,12 +30,14 @@ export const useSessionStatus = () => {
     timeRemaining: 0,
     plan: null,
     expiry: null,
-    dataUsage: null
+    dataUsage: null,
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mountedRef = useRef(true);
+  const retryCountRef = useRef(0);
+  const maxRetries = 3;
 
   const fetchStatus = useCallback(async () => {
     if (!mountedRef.current) return;
@@ -44,31 +45,56 @@ export const useSessionStatus = () => {
     try {
       setError(null);
 
-      const response = await axios.get("/api/session-status", {
-        timeout: 10000,
-        // Add cache prevention
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+      const response = await fetch("/api/session-status", {
+        method: "GET",
         headers: {
           "Cache-Control": "no-cache",
-          Pragma: "no-cache"
-        }
+          Pragma: "no-cache",
+          "Content-Type": "application/json",
+        },
+        signal: controller.signal,
       });
 
-      if (mountedRef.current) {
-        setStatus(response.data);
-        setLoading(false);
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-    } catch (error) {
-      console.error("Session status fetch error:", error);
+
+      const data = await response.json();
+
       if (mountedRef.current) {
-        setError("Failed to fetch session status");
+        setStatus(data);
         setLoading(false);
-        setStatus({
-          hasActiveSession: false,
-          timeRemaining: 0,
-          plan: null,
-          expiry: null,
-          dataUsage: null
-        });
+        retryCountRef.current = 0; // Reset retry count on success
+      }
+    } catch (error: any) {
+      console.error("Session status fetch error:", error);
+
+      if (mountedRef.current) {
+        retryCountRef.current += 1;
+
+        if (retryCountRef.current <= maxRetries) {
+          // Retry with exponential backoff
+          setTimeout(() => {
+            if (mountedRef.current) {
+              fetchStatus();
+            }
+          }, Math.pow(2, retryCountRef.current) * 1000);
+        } else {
+          setError("Failed to fetch session status after multiple attempts");
+          setLoading(false);
+          setStatus({
+            hasActiveSession: false,
+            timeRemaining: 0,
+            plan: null,
+            expiry: null,
+            dataUsage: null,
+          });
+        }
       }
     }
   }, []);
@@ -76,10 +102,8 @@ export const useSessionStatus = () => {
   useEffect(() => {
     mountedRef.current = true;
 
-    // Initial fetch
     fetchStatus();
 
-    // Set up polling only after initial fetch
     const setupPolling = () => {
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
@@ -89,10 +113,9 @@ export const useSessionStatus = () => {
         if (mountedRef.current) {
           fetchStatus();
         }
-      }, 45000); // Increased to 45 seconds to reduce load
+      }, 30000); // Reduced to 30 seconds for better UX
     };
 
-    // Start polling after initial load
     const timer = setTimeout(setupPolling, 2000);
 
     return () => {
