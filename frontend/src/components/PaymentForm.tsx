@@ -1,12 +1,5 @@
 import { useState, useCallback } from "react";
-import {
-  Clock,
-  Phone,
-  CreditCard,
-  AlertCircle,
-  CheckCircle,
-  Loader,
-} from "lucide-react";
+import { Clock, Phone, CreditCard, AlertCircle, CheckCircle, Loader } from "lucide-react";
 import { usePaymentPolling } from "../hooks/usePaymentPolling";
 import { useSession } from "../contexts/SessionContext";
 
@@ -23,16 +16,11 @@ const PaymentForm = () => {
   const [planId, setPlanId] = useState("");
   const [phone, setPhone] = useState("");
   const [message, setMessage] = useState("");
-  const [messageType, setMessageType] = useState<"success" | "error" | "info">(
-    "info"
-  );
+  const [messageType, setMessageType] = useState<"success" | "error" | "info">("info");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [validationErrors, setValidationErrors] = useState<
-    Record<string, string>
-  >({});
+  const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
 
-  const { startPolling, isPolling, cleanup, timeRemaining } =
-    usePaymentPolling();
+  const { startPolling, isPolling, cleanup, timeRemaining } = usePaymentPolling();
   const { refreshSession } = useSession();
 
   const plans: Plan[] = [
@@ -42,7 +30,7 @@ const PaymentForm = () => {
       displayDuration: "30 Minutes",
       price: 0,
       description: "100MB Data Cap",
-      popular: false,
+      popular: false
     },
     {
       id: "quick-surf",
@@ -50,7 +38,7 @@ const PaymentForm = () => {
       displayDuration: "1 Hour",
       price: 10,
       description: "Unlimited Data",
-      popular: false,
+      popular: false
     },
     {
       id: "daily-boost",
@@ -58,7 +46,7 @@ const PaymentForm = () => {
       displayDuration: "24 Hours",
       price: 50,
       description: "5GB Data Cap",
-      popular: true,
+      popular: true
     },
     {
       id: "family-share",
@@ -66,7 +54,7 @@ const PaymentForm = () => {
       displayDuration: "24 Hours",
       price: 80,
       description: "10GB Shared Data",
-      popular: false,
+      popular: false
     },
     {
       id: "weekly-unlimited",
@@ -74,8 +62,8 @@ const PaymentForm = () => {
       displayDuration: "7 Days",
       price: 200,
       description: "Unlimited Data (5Mbps)",
-      popular: false,
-    },
+      popular: false
+    }
   ];
 
   const validateForm = useCallback(() => {
@@ -89,8 +77,7 @@ const PaymentForm = () => {
       if (!phone) {
         errors.phone = "Phone number is required for paid plans";
       } else if (!/^254\d{9}$/.test(phone)) {
-        errors.phone =
-          "Please enter a valid Kenyan phone number (254xxxxxxxxx)";
+        errors.phone = "Please enter a valid Kenyan phone number (254xxxxxxxxx)";
       }
     }
 
@@ -98,32 +85,23 @@ const PaymentForm = () => {
     return Object.keys(errors).length === 0;
   }, [planId, phone]);
 
-  const showMessage = useCallback(
-    (msg: string, type: "success" | "error" | "info" = "info") => {
-      setMessage(msg);
-      setMessageType(type);
+  const showMessage = useCallback((msg: string, type: "success" | "error" | "info" = "info") => {
+    setMessage(msg);
+    setMessageType(type);
 
-      // Auto-clear success messages after 5 seconds
-      if (type === "success") {
-        setTimeout(() => setMessage(""), 5000);
-      }
-    },
-    []
-  );
+    // Auto-clear success messages after 5 seconds
+    if (type === "success") {
+      setTimeout(() => setMessage(""), 5000);
+    }
+  }, []);
 
   const handleFreeAccess = useCallback(async () => {
     try {
-      const userIP =
-        localStorage.getItem("userIP") ||
-        new URLSearchParams(window.location.search).get("ip");
-      const userMAC =
-        localStorage.getItem("userMAC") ||
-        new URLSearchParams(window.location.search).get("mac");
+      const userIP = localStorage.getItem("userIP") || new URLSearchParams(window.location.search).get("ip");
+      const userMAC = localStorage.getItem("userMAC") || new URLSearchParams(window.location.search).get("mac");
 
       if (!userIP) {
-        throw new Error(
-          "Unable to determine your IP address. Please try refreshing the page."
-        );
+        throw new Error("Unable to determine your IP address. Please try refreshing the page.");
       }
 
       const response = await fetch("/api/grant-free-access", {
@@ -132,24 +110,19 @@ const PaymentForm = () => {
         body: JSON.stringify({
           ip: userIP,
           mac: userMAC,
-          duration: "30m",
-        }),
+          duration: "30m"
+        })
       });
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(
-          errorData.message || `Server error: ${response.status}`
-        );
+        throw new Error(errorData.message || `Server error: ${response.status}`);
       }
 
       const data = await response.json();
 
       if (data.success) {
-        showMessage(
-          "🎉 Free access granted successfully! Redirecting...",
-          "success"
-        );
+        showMessage("🎉 Free access granted successfully! Redirecting...", "success");
 
         // Refresh session state
         await refreshSession();
@@ -167,61 +140,50 @@ const PaymentForm = () => {
     }
   }, [refreshSession, showMessage]);
 
-  const handlePaidPlan = useCallback(
-    async (selectedPlan: Plan) => {
-      try {
-        const response = await fetch("/api/pay", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ planId, phone }),
-        });
+  const handlePaidPlan = useCallback(async () => {
+    try {
+      const response = await fetch("/api/pay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planId, phone })
+      });
 
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(
-            errorData.error || `Server error: ${response.status}`
-          );
-        }
-
-        const data = await response.json();
-
-        if (data.success && data.checkoutRequestId) {
-          showMessage(
-            "📱 Payment request sent to your phone. Please complete the M-Pesa transaction.",
-            "info"
-          );
-
-          // Start polling for payment confirmation
-          startPolling(
-            data.checkoutRequestId,
-            async () => {
-              showMessage(
-                "✅ Payment successful! Internet access granted. Redirecting...",
-                "success"
-              );
-              await refreshSession();
-              setTimeout(() => {
-                window.location.replace("https://google.com");
-              }, 2000);
-            },
-            (error) => {
-              showMessage(error, "error");
-            }
-          );
-        } else if (data.success) {
-          // Immediate success (shouldn't happen for paid plans)
-          showMessage("✅ Access granted successfully!", "success");
-          await refreshSession();
-        } else {
-          throw new Error(data.error || "Payment initiation failed");
-        }
-      } catch (error: any) {
-        console.error("Payment error:", error);
-        showMessage(`Payment failed: ${error.message}`, "error");
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `Server error: ${response.status}`);
       }
-    },
-    [planId, phone, startPolling, refreshSession, showMessage]
-  );
+
+      const data = await response.json();
+
+      if (data.success && data.checkoutRequestId) {
+        showMessage("📱 Payment request sent to your phone. Please complete the M-Pesa transaction.", "info");
+
+        // Start polling for payment confirmation
+        startPolling(
+          data.checkoutRequestId,
+          async () => {
+            showMessage("✅ Payment successful! Internet access granted. Redirecting...", "success");
+            await refreshSession();
+            setTimeout(() => {
+              window.location.replace("https://google.com");
+            }, 2000);
+          },
+          error => {
+            showMessage(error, "error");
+          }
+        );
+      } else if (data.success) {
+        // Immediate success (shouldn't happen for paid plans)
+        showMessage("✅ Access granted successfully!", "success");
+        await refreshSession();
+      } else {
+        throw new Error(data.error || "Payment initiation failed");
+      }
+    } catch (error: any) {
+      console.error("Payment error:", error);
+      showMessage(`Payment failed: ${error.message}`, "error");
+    }
+  }, [planId, phone, startPolling, refreshSession, showMessage]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -235,7 +197,7 @@ const PaymentForm = () => {
     setMessage("");
 
     try {
-      const selectedPlan = plans.find((p) => p.id === planId);
+      const selectedPlan = plans.find(p => p.id === planId);
       if (!selectedPlan) {
         throw new Error("Invalid plan selected");
       }
@@ -243,7 +205,7 @@ const PaymentForm = () => {
       if (selectedPlan.price === 0) {
         await handleFreeAccess();
       } else {
-        await handlePaidPlan(selectedPlan);
+        await handlePaidPlan();
       }
     } catch (error: any) {
       showMessage(`Error: ${error.message}`, "error");
@@ -259,7 +221,7 @@ const PaymentForm = () => {
   };
 
   // Get selected plan for display purposes
-  const currentPlan = plans.find((p) => p.id === planId);
+  const currentPlan = plans.find(p => p.id === planId);
 
   return (
     <div className="payment-form">
@@ -279,41 +241,28 @@ const PaymentForm = () => {
           )}
 
           <div className="plans-grid">
-            {plans.map((planOption) => (
+            {plans.map(planOption => (
               <label
                 key={planOption.id}
                 className={`plan-option ${
                   planId === planOption.id ? "selected" : ""
-                } ${planOption.popular ? "popular" : ""} ${
-                  isSubmitting || isPolling ? "disabled" : ""
-                }`}
-              >
+                } ${planOption.popular ? "popular" : ""} ${isSubmitting || isPolling ? "disabled" : ""}`}>
                 <input
                   type="radio"
                   name="plan"
                   value={planOption.id}
                   checked={planId === planOption.id}
-                  onChange={(e) => setPlanId(e.target.value)}
+                  onChange={e => setPlanId(e.target.value)}
                   disabled={isSubmitting || isPolling}
                   className="plan-radio"
                 />
                 <div className="plan-content">
                   <div className="plan-header">
-                    <span className="plan-duration">
-                      {planOption.displayDuration}
-                    </span>
-                    <span className="plan-price">
-                      {planOption.price === 0
-                        ? "FREE"
-                        : `KSh ${planOption.price}`}
-                    </span>
+                    <span className="plan-duration">{planOption.displayDuration}</span>
+                    <span className="plan-price">{planOption.price === 0 ? "FREE" : `KSh ${planOption.price}`}</span>
                   </div>
-                  <span className="plan-description">
-                    {planOption.description}
-                  </span>
-                  {planOption.popular && (
-                    <span className="popular-badge">Most Popular</span>
-                  )}
+                  <span className="plan-description">{planOption.description}</span>
+                  {planOption.popular && <span className="popular-badge">Most Popular</span>}
                 </div>
                 <div className="radio-indicator">
                   <div className="radio-dot"></div>
@@ -342,28 +291,20 @@ const PaymentForm = () => {
               type="tel"
               placeholder="254712345678"
               value={phone}
-              onChange={(e) => setPhone(e.target.value.replace(/\D/g, ""))} // Only allow digits
+              onChange={e => setPhone(e.target.value.replace(/\D/g, ""))} // Only allow digits
               disabled={isSubmitting || isPolling}
               className={`phone-input ${validationErrors.phone ? "error" : ""}`}
               maxLength={12}
             />
-            <p className="input-hint">
-              Enter your Safaricom number starting with 254
-            </p>
+            <p className="input-hint">Enter your Safaricom number starting with 254</p>
           </div>
         )}
 
         {/* Submit Button */}
         <button
           type="submit"
-          disabled={
-            !planId ||
-            (phone === "" && planId !== "community-freebie") ||
-            isSubmitting ||
-            isPolling
-          }
-          className="pay-button"
-        >
+          disabled={!planId || (phone === "" && planId !== "community-freebie") || isSubmitting || isPolling}
+          className="pay-button">
           {isSubmitting || isPolling ? (
             <Loader size={20} className="spinner" />
           ) : currentPlan?.price === 0 ? (
@@ -381,23 +322,17 @@ const PaymentForm = () => {
           {isSubmitting
             ? "Processing..."
             : isPolling
-            ? `Waiting for payment... (${Math.floor(timeRemaining / 60)}:${(
-                timeRemaining % 60
-              )
-                .toString()
-                .padStart(2, "0")})`
-            : currentPlan?.price === 0
-            ? "Start Free Trial"
-            : "Proceed with Payment"}
+              ? `Waiting for payment... (${Math.floor(timeRemaining / 60)}:${(timeRemaining % 60)
+                  .toString()
+                  .padStart(2, "0")})`
+              : currentPlan?.price === 0
+                ? "Start Free Trial"
+                : "Proceed with Payment"}
         </button>
 
         {/* Cancel Button - Show when polling */}
         {isPolling && (
-          <button
-            type="button"
-            onClick={handleCancel}
-            className="cancel-button"
-          >
+          <button type="button" onClick={handleCancel} className="cancel-button">
             Cancel Payment
           </button>
         )}
