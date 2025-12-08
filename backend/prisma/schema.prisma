@@ -1,8 +1,5 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// Multi-Tenant Hotspot System
 
 generator client {
   provider = "prisma-client-js"
@@ -13,19 +10,290 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Session {
-  id                Int      @id @default(autoincrement())
-  mac               String
-  ip                String
-  cloudflareIP      String?
-  planName          String
-  planHours         Float
-  dataCap           Int?
-  expiry            DateTime
-  paid              Boolean  @default(false)
-  checkoutRequestId String?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-
-  @@map("sessions")
+// ============================================
+// CLIENT MODELS
+// ============================================
+model Tenant {
+  id              String    @id @default(uuid())
+  
+  // Basic Info
+  name            String  
+  slug            String    @unique 
+  
+  // Owner Contact
+  ownerName       String
+  ownerPhone      String
+  ownerEmail      String?
+  
+  // MikroTik Connection
+  mikrotikId      String    @unique // Unique identifier for this router
+  tunnelKey       String    @unique // Secret key for API authentication
+  mikrotikHost    String    // Can be local IP: 192.168.88.1
+  mikrotikUser    String    @default("admin")
+  mikrotikPass    String    // Encrypted
+  mikrotikPort    Int       @default(8728)
+  
+  // M-Pesa Configuration (Optional - per client)
+  mpesaShortcode  String?
+  mpesaKey        String?   // Encrypted
+  mpesaSecret     String?   // Encrypted
+  mpesaPasskey    String?   // Encrypted
+  usesOwnMpesa    Boolean   @default(false)
+  
+  // Branding
+  brandColor      String    @default("#4F46E5")
+  logoUrl         String?
+  splashMessage   String?   @default("Welcome! Connect to cheap and available wifi")
+  
+  // Status & Monitoring
+  isActive        Boolean   @default(true)
+  lastSeen        DateTime? // Last heartbeat from router
+  lastHealthCheck DateTime? @default(now())
+  
+  // Billing
+  setupFee        Int       @default(5000) // KSh
+  monthlyFee      Int       @default(2500) // KSh
+  revenueShare    Float     @default(0.15) // 15%
+  billingType     String    @default("fixed") // "fixed" | "revenue_share" | "hybrid"
+  
+  // Relations
+  sessions        Session[]
+  transactions    Transaction[]
+  plans           Plan[]
+  heartbeats      RouterHeartbeat[]
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([slug])
+  @@index([mikrotikId])
+  @@index([isActive, lastSeen])
+  @@index([ownerPhone])
 }
+
+// ============================================
+// PLAN - WiFi access plans per client
+// ============================================
+model Plan {
+  id              String    @id @default(uuid())
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  // Plan Details
+  name            String    // "1 Hour Pass"
+  description     String?   // "Perfect for quick browsing"
+  hours           Float     // 1.0, 4.0, 24.0, 168.0 (week)
+  price           Int       // In cents/smallest unit (1000 = KSh 10.00)
+  dataCap         Int?      // MB, null = unlimited
+  speedLimit      String?   // "5M/5M" MikroTik format
+  
+  // Display
+  isActive        Boolean   @default(true)
+  isFeatured      Boolean   @default(false)
+  sortOrder       Int       @default(0)
+  
+  // Marketing
+  badge           String?   // "POPULAR", "BEST VALUE"
+  
+  sessions        Session[]
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([tenantId, isActive, sortOrder])
+  @@unique([tenantId, name])
+}
+
+// ============================================
+// SESSION - Active user sessions
+// ============================================
+model Session {
+  id              String         @id @default(uuid())
+  tenantId        String
+  tenant          Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  planId          String
+  plan            Plan           @relation(fields: [planId], references: [id])
+  
+  // Client Identification
+  mac             String
+  currentIP       String?
+  cloudflareIP    String?        // For logging
+  ipHistory       String[]       // Track IP changes (JSON array)
+  deviceInfo      String?        // User agent
+  deviceFingerprint String?      // Browser fingerprint
+  
+  // Session Details
+  status          SessionStatus  @default(PENDING)
+  startsAt        DateTime       @default(now())
+  expiresAt       DateTime
+  dataUsedMB      Float          @default(0)
+  dataCapMB       Int?           // Copied from plan at creation
+  
+  // Payment
+  transactionId   String?        @unique
+  
+  // Tracking
+  lastSeenAt      DateTime       @default(now())
+  disconnectedAt  DateTime?
+  terminationReason String?      // "expired", "data_cap", "manual", "payment_failed"
+  
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  
+  @@index([tenantId, status, expiresAt])
+  @@index([mac, status])
+  @@index([currentIP])
+  @@index([transactionId])
+  @@index([tenantId, mac, status])
+}
+
+enum SessionStatus {
+  PENDING       // Payment not confirmed
+  ACTIVE        // Currently active
+  EXPIRED       // Time expired
+  DATA_EXCEEDED // Data cap exceeded
+  TERMINATED    // Manually disconnected
+  CANCELLED     // Payment failed/cancelled
+}
+
+// ============================================
+// TRANSACTION - M-Pesa payments
+// ============================================
+model Transaction {
+  id                  String            @id @default(uuid())
+  tenantId            String
+  tenant              Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  sessionId           String?           @unique
+  
+  // Payment Details
+  phoneNumber         String
+  amount              Int               // In smallest unit
+  currency            String            @default("KES")
+  
+  // M-Pesa Specific
+  checkoutRequestId   String?           @unique
+  merchantRequestId   String?
+  mpesaReceiptNumber  String?           @unique
+  transactionDate     DateTime?
+  
+  // Status
+  status              TransactionStatus @default(PENDING)
+  resultCode          Int?
+  resultDesc          String?
+  failureReason       String?
+  
+  // Metadata
+  metadata            Json?             // Additional data
+  
+  // Retries
+  retryCount          Int               @default(0)
+  lastRetryAt         DateTime?
+  
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+  
+  @@index([tenantId, status, createdAt])
+  @@index([checkoutRequestId])
+  @@index([mpesaReceiptNumber])
+  @@index([phoneNumber])
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+// ============================================
+// ROUTER HEARTBEAT - Health monitoring
+// ============================================
+model RouterHeartbeat {
+  id              String    @id @default(uuid())
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  mikrotikId      String
+  
+  // System Stats
+  activeUsers     Int       @default(0)
+  totalBindings   Int       @default(0)
+  cpuLoad         Float?
+  memoryUsed      Float?
+  memoryTotal     Float?
+  uptime          String?
+  version         String?
+  boardName       String?
+  
+  // Network Stats
+  bytesIn         BigInt?
+  bytesOut        BigInt?
+  
+  timestamp       DateTime  @default(now())
+  
+  @@index([tenantId, timestamp])
+  @@index([mikrotikId, timestamp])
+}
+
+// ============================================
+// ADMIN USER - System administrators
+// ============================================
+model AdminUser {
+  id              String    @id @default(uuid())
+  
+  email           String    @unique
+  passwordHash    String
+  
+  name            String
+  role            String    @default("admin") // "admin" | "support" | "superadmin"
+  
+  isActive        Boolean   @default(true)
+  lastLogin       DateTime?
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([email])
+}
+
+// ============================================
+// AUDIT LOG - Track all actions
+// ============================================
+model AuditLog {
+  id              String    @id @default(uuid())
+  
+  tenantId        String?
+  adminUserId     String?
+  
+  action          String    // "session_created", "payment_completed", etc.
+  entity          String    // "Session", "Transaction", etc.
+  entityId        String?
+  
+  details         Json?
+  ipAddress       String?
+  userAgent       String?
+  
+  createdAt       DateTime  @default(now())
+  
+  @@index([tenantId, createdAt])
+  @@index([adminUserId, createdAt])
+  @@index([action, createdAt])
+}
+
+// ============================================
+// SYSTEM CONFIG - Global settings
+// ============================================
+model SystemConfig {
+  id              String    @id @default(uuid())
+  
+  key             String    @unique
+  value           String
+  description     String?
+  
+  updatedAt       DateTime  @updatedAt
+}
+
+
