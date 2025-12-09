@@ -417,7 +417,7 @@ class MultiTenantMpesaService {
   encryptField(value: string): string {
     try {
       const algorithm = "aes-256-gcm";
-      const key = Buffer.from(process.env.ENCRYPTION_KEY || "default-32-char-key-change-this!", "utf8");
+      const key = Buffer.from(process.env.ENCRYPTION_KEY || "PYj1mgxUAANNiVuhcMkruhk6Ictz/AZnuWplMdtfrCQ=", "utf8");
       const iv = crypto.randomBytes(16);
 
       const cipher = crypto.createCipheriv(algorithm, key, iv);

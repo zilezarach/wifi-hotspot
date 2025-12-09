@@ -1,4 +1,3 @@
-// app.ts
 import express from "express";
 import cors from "cors";
 import path from "path";
@@ -10,7 +9,7 @@ import {
   initiatePayment,
   mpesaCallback,
   getSessionStatus,
-  disconnectSession,
+  disconnectSession
 } from "./controllers/portalController";
 import {
   createTenant,
@@ -20,10 +19,12 @@ import {
   deleteTenant,
   testTenantConnection,
   getDashboard,
-  getTenantAnalytics,
+  getTenantAnalytics
 } from "./controllers/adminController";
 
 const app = express();
+
+const isDev = process.env.NODE_ENV !== "production";
 
 const paymentLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -31,11 +32,27 @@ const paymentLimiter = rateLimit({
   message: { error: "Too many requests – try again later" },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => {
+  skip: req => {
     // Skip rate limiting for health checks
     return req.path === "/health";
-  },
+  }
 });
+
+if (!isDev) {
+  app.use(
+    express.static(path.join(__dirname, "../public"), {
+      index: false,
+      maxAge: "1d"
+    })
+  );
+  // SPA fallback
+  app.get("*", (req, res) => {
+    if (req.path.startsWith("/api")) {
+      return res.status(404).json({ error: "API endpoint not found" });
+    }
+    res.sendFile(path.join(__dirname, "../public/index.html"));
+  });
+}
 
 // Middleware
 app.use(cors({ origin: "*" }));
@@ -70,8 +87,8 @@ app.get("/health", (req: express.Request, res: express.Response) => {
 app.use(
   express.static(path.join(__dirname, "../public"), {
     index: false, // Don't automatically serve index.html
-    maxAge: "1d",
-  }),
+    maxAge: "1d"
+  })
 );
 
 // SPA fallback - serve React app for all non-API routes
@@ -85,16 +102,9 @@ app.get("*", (req, res) => {
 });
 
 // Global error handler
-app.use(
-  (
-    err: Error,
-    req: express.Request,
-    res: express.Response,
-    next: express.NextFunction,
-  ) => {
-    logger.error(`Error on ${req.method} ${req.url}:`, err);
-    res.status(500).json({ error: "Server error – please try again" });
-  },
-);
+app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  logger.error(`Error on ${req.method} ${req.url}:`, err);
+  res.status(500).json({ error: "Server error – please try again" });
+});
 
 export default app;
