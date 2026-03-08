@@ -8,7 +8,10 @@
     "build:full": "prisma generate && tsc && prisma migrate deploy",
     "migrate": "prisma migrate deploy",
     "dev": "tsx watch src/server.ts",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "seed": "tsx prisma/seed.ts",
+    "validate-env": "tsx scripts/validate-env.ts",
+    "generate-key": "tsx scripts/generate-encryption-key.ts"
   },
   "keywords": [],
   "author": "",
